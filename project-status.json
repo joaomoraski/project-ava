@@ -1,0 +1,51 @@
+{
+  "last_updated": "2026-03-30T00:00:00Z",
+  "backend": {
+    "B1": { "status": "done", "completed": "2026-03-30", "notes": "FastAPI 8471, WebSocket 8472, startup checks, logging, rate limiting, security headers, secrets vault, Google OAuth skeleton, all API route stubs, CLI skeleton, 18 tests passing" },
+    "B2": { "status": "pending" },
+    "B3": { "status": "pending" },
+    "B4": { "status": "pending" },
+    "B5": { "status": "pending" },
+    "B6": { "status": "pending" },
+    "B7": { "status": "pending" },
+    "B8": { "status": "pending" },
+    "B9": { "status": "pending" },
+    "B10": { "status": "pending" },
+    "B11": { "status": "pending" },
+    "B12": { "status": "pending" },
+    "B13": { "status": "pending" }
+  },
+  "frontend_nextjs_ready": false,
+  "frontend_electron_ready": false,
+  "available_endpoints": [
+    "/",
+    "/health",
+    "/openapi.json",
+    "/docs",
+    "/api/config",
+    "/api/modes/current",
+    "/api/modes/switch",
+    "/api/workspaces (stub)",
+    "/api/chats (stub)",
+    "/api/knowledge (stub)",
+    "/api/plugins (stub)",
+    "/api/mcp (stub)",
+    "/api/secrets",
+    "/auth/google",
+    "/auth/google/callback",
+    "/auth/google/status",
+    "/ws"
+  ],
+  "available_websocket_events": ["connected", "pong"],
+  "avatar_only_events": ["audio_chunk", "lipsync", "animation"],
+  "pending_endpoints": [
+    "/api/workspaces (full — B6)",
+    "/api/chats (full — B5)",
+    "/api/knowledge (full — B7)",
+    "/api/plugins (full — B8)",
+    "/api/mcp (full — B8)"
+  ],
+  "swagger_url": "http://localhost:8471/docs",
+  "openapi_json": "http://localhost:8471/openapi.json",
+  "notes": "B1 done — infrastructure complete. Run: cd backend && uvicorn main:app --port 8471 to start. Frontend cannot start yet — wait for B5."
+}
