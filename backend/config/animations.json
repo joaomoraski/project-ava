@@ -1,1 +1,41 @@
-{"animations": {}}
+{
+  "animations": {
+    "wave": {
+      "file": "wave.vrma",
+      "description": "Friendly wave gesture",
+      "triggers": ["hello", "hi", "hey", "greet", "goodbye", "bye", "see you"]
+    },
+    "nod": {
+      "file": "nod.vrma",
+      "description": "Agreement nod",
+      "triggers": ["yes", "agree", "correct", "right", "exactly", "sure", "ok"]
+    },
+    "shake": {
+      "file": "shake.vrma",
+      "description": "Disagreement head shake",
+      "triggers": ["no", "disagree", "wrong", "incorrect", "never"]
+    },
+    "think": {
+      "file": "think.vrma",
+      "description": "Thinking pose",
+      "triggers": ["think", "consider", "hmm", "let me", "analyzing", "checking"]
+    },
+    "celebrate": {
+      "file": "celebrate.vrma",
+      "description": "Celebration animation",
+      "triggers": ["done", "finished", "completed", "great", "excellent", "success", "congrats"]
+    },
+    "dance": {
+      "file": "dance.vrma",
+      "description": "Dance animation",
+      "triggers": ["dance", "party", "woo"]
+    },
+    "idle": {
+      "file": "idle.vrma",
+      "description": "Default idle animation",
+      "triggers": []
+    }
+  },
+  "default_animation": "idle",
+  "intent_detection_enabled": true
+}
