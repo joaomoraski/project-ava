@@ -117,5 +117,10 @@ class PluginRegistry:
         return dict(TOOL_GROUPS)
 
 
-# Global singleton
+# Global singleton — wired to mcp_manager in main.py startup
 plugin_registry = PluginRegistry()
+
+def initialize_registry() -> None:
+    """Wire the global MCP manager into the plugin registry. Call on startup."""
+    from core.plugins.mcp_manager import mcp_manager
+    plugin_registry.set_mcp_manager(mcp_manager)
