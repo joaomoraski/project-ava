@@ -1,7 +1,7 @@
 """Kokoro TTS — streaming synthesis per sentence.
 
-Kokoro is a lightweight (82M param) TTS model (Apache 2.0).
-Streams audio as numpy arrays, one sentence chunk at a time.
+Uses kokoro-onnx (ONNX runtime, numpy 2.x compatible, Python 3.13+).
+Apache 2.0 licensed, runs fully offline.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ KOKORO_SAMPLE_RATE = 24000
 class KokoroTTS:
     """Kokoro TTS wrapper with per-sentence streaming.
 
-    Models are loaded lazily on first call to load().
+    Uses kokoro-onnx backend — compatible with Python 3.13 and numpy 2.x.
     Supports 54 voices across 8 languages.
     """
 
@@ -31,59 +31,38 @@ class KokoroTTS:
     ) -> None:
         self._voice = voice or settings.tts_voice
         self._language = language or settings.tts_language
-        self._pipeline = None
+        self._model = None
 
     def load(self) -> None:
-        """Load Kokoro pipeline into memory."""
+        """Load Kokoro ONNX model into memory."""
         try:
-            from kokoro import KPipeline
+            from kokoro_onnx import Kokoro
         except ImportError:
-            logger.error("kokoro not installed. Run: pip install kokoro")
+            logger.error("kokoro-onnx not installed. Run: pip install kokoro-onnx")
             raise
 
-        lang_code = self._resolve_lang_code(self._language)
-        logger.info(f"Loading Kokoro TTS (voice={self._voice}, lang={lang_code})...")
-
-        self._pipeline = KPipeline(lang_code=lang_code)
+        logger.info(f"Loading Kokoro TTS (voice={self._voice}, lang={self._language})...")
+        self._model = Kokoro.from_pretrained()
         logger.info("Kokoro TTS loaded.")
-
-    def _resolve_lang_code(self, language: str) -> str:
-        """Map language name/code to Kokoro lang_code."""
-        mapping = {
-            "pt": "p",
-            "pt-br": "p",
-            "en": "a",
-            "en-us": "a",
-            "en-gb": "b",
-            "fr": "f",
-            "ja": "j",
-            "ko": "k",
-            "zh": "z",
-            "es": "e",
-            "hi": "h",
-        }
-        return mapping.get(language.lower(), "a")  # default to American English
 
     def synthesize(self, text: str) -> np.ndarray | None:
         """Synthesize text to audio. Returns numpy float32 array or None on failure."""
-        if self._pipeline is None:
+        if self._model is None:
             raise RuntimeError("Kokoro not loaded. Call load() first.")
 
         if not text.strip():
             return None
 
         try:
-            audio_parts = []
-            for _, _, audio in self._pipeline(text, voice=self._voice):
-                if audio is not None and len(audio) > 0:
-                    audio_parts.append(audio)
-
-            if not audio_parts:
-                return None
-
-            return np.concatenate(audio_parts).astype(np.float32)
+            audio, sample_rate = self._model.create(
+                text,
+                voice=self._voice,
+                speed=1.0,
+                lang=self._language,
+            )
+            return audio.astype(np.float32)
         except Exception as e:
-            logger.error(f"Kokoro synthesis failed for text '{text[:50]}...': {e}")
+            logger.error(f"Kokoro synthesis failed for text '{text[:50]}': {e}")
             return None
 
     async def asynthesize(self, text: str) -> np.ndarray | None:
@@ -98,4 +77,4 @@ class KokoroTTS:
 
     @property
     def loaded(self) -> bool:
-        return self._pipeline is not None
+        return self._model is not None

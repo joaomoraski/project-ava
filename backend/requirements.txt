@@ -32,7 +32,7 @@ langchain-chroma>=0.1.4
 langchain-community>=0.3.7
 
 # === Voice Pipeline ===
-pipecat-ai[silero]>=0.0.53
+# pipecat-ai not needed — Silero VAD loads directly from torch hub
 faster-whisper>=1.1.0
 sounddevice>=0.5.0
 numpy>=1.26.4
@@ -41,7 +41,7 @@ torch>=2.6.0
 torchaudio>=2.6.0
 
 # === TTS ===
-kokoro>=0.7.0
+kokoro-onnx>=0.5.0  # kokoro-onnx: Python 3.13 compatible, numpy 2.x, fully local
 
 # === Knowledge Base ===
 chromadb>=1.0.0
@@ -67,4 +67,3 @@ pyannote-audio>=3.3.2
 # === Dev ===
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
-httpx>=0.27.2
