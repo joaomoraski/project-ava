@@ -1,61 +1,58 @@
-"""Tests for the encrypted secrets vault."""
-import os
+"""Tests for the encrypted secrets vault — PostgreSQL backend."""
 import pytest
+
+from core.secrets.vault import SecretsVault
 
 
 @pytest.fixture()
-def vault(tmp_path):
-    """Isolated vault for each test."""
-    import sys, os
-    # Run from tmp dir so secrets/ is created there
-    orig = os.getcwd()
-    os.chdir(tmp_path)
-    from importlib import reload
-    import core.secrets.crypto as crypto_mod
-    import core.secrets.vault as vault_mod
-    reload(crypto_mod)
-    reload(vault_mod)
-    from core.secrets.vault import SecretsVault
-    v = SecretsVault(vault_path=str(tmp_path / "vault.enc"))
-    yield v
-    os.chdir(orig)
+def vault():
+    return SecretsVault()
 
 
-def test_set_and_get(vault):
-    vault.set_secret("API_KEY", "supersecret123")
-    assert vault.get_secret("API_KEY") == "supersecret123"
+@pytest.mark.asyncio
+async def test_set_and_get(vault, db_session):
+    await vault.set_secret(db_session, "TEST_KEY_1", "supersecret123")
+    assert await vault.get_secret(db_session, "TEST_KEY_1") == "supersecret123"
 
 
-def test_preview_never_returns_full_value(vault):
-    vault.set_secret("API_KEY", "supersecret123")
-    preview = vault.get_preview("API_KEY")
+@pytest.mark.asyncio
+async def test_preview_never_returns_full_value(vault, db_session):
+    await vault.set_secret(db_session, "TEST_KEY_2", "supersecret123")
+    preview = await vault.get_preview(db_session, "TEST_KEY_2")
     assert preview["is_set"] is True
     assert "supersecret123" not in preview["preview"]
     assert "****" in preview["preview"]
 
 
-def test_preview_unset(vault):
-    preview = vault.get_preview("NONEXISTENT")
+@pytest.mark.asyncio
+async def test_preview_unset(vault, db_session):
+    preview = await vault.get_preview(db_session, "NONEXISTENT_XYZ")
     assert preview["is_set"] is False
     assert preview["preview"] == ""
 
 
-def test_delete(vault):
-    vault.set_secret("TO_DELETE", "value")
-    vault.delete_secret("TO_DELETE")
-    assert vault.get_secret("TO_DELETE") is None
+@pytest.mark.asyncio
+async def test_delete(vault, db_session):
+    await vault.set_secret(db_session, "TEST_TO_DELETE", "value")
+    await vault.delete_secret(db_session, "TEST_TO_DELETE")
+    assert await vault.get_secret(db_session, "TEST_TO_DELETE") is None
 
 
-def test_list_secrets(vault):
-    vault.set_secret("KEY_A", "value_a")
-    vault.set_secret("KEY_B", "value_b")
-    names = vault.list_secrets()
-    assert "KEY_A" in names
-    assert "KEY_B" in names
+@pytest.mark.asyncio
+async def test_list_secrets(vault, db_session):
+    await vault.set_secret(db_session, "TEST_KEY_A", "value_a")
+    await vault.set_secret(db_session, "TEST_KEY_B", "value_b")
+    names = await vault.list_secrets(db_session)
+    assert "TEST_KEY_A" in names
+    assert "TEST_KEY_B" in names
 
 
-def test_env_resolution(vault):
-    vault.set_secret("TODOIST_TOKEN", "actual_value")
-    env = vault.get_env_for_mcp({"TODOIST_API_TOKEN": "${TODOIST_TOKEN}", "STATIC": "static_val"})
+@pytest.mark.asyncio
+async def test_env_resolution(vault, db_session):
+    await vault.set_secret(db_session, "TODOIST_TOKEN", "actual_value")
+    env = await vault.get_env_for_mcp(
+        db_session,
+        {"TODOIST_API_TOKEN": "${TODOIST_TOKEN}", "STATIC": "static_val"},
+    )
     assert env["TODOIST_API_TOKEN"] == "actual_value"
     assert env["STATIC"] == "static_val"

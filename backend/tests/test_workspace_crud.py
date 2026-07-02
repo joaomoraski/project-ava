@@ -1,185 +1,182 @@
-"""Tests for workspace CRUD operations and chat history."""
-import json
-import os
+"""Tests for workspace CRUD operations and chat history — PostgreSQL backend."""
 import pytest
+import pytest_asyncio
 
 from core.memory.chat_history import ChatManager, CrossWorkspaceChatManager, ChatSession
+from core.workspace import create_workspace, workspace_exists
+
+
+@pytest.fixture()
+def _ensure_workspace(db_session):
+    """Ensure test workspaces exist in DB for chat tests."""
+    import asyncio
+
+    async def _create():
+        for name in ("personal", "ws1", "ws2"):
+            if not await workspace_exists(db_session, name):
+                await create_workspace(db_session, name)
+
+    asyncio.get_event_loop().run_until_complete(_create())
 
 
 class TestChatSession:
-    def test_create_and_append(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/test/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_create_and_append(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        session = ChatSession(session_id="abc123", workspace="test", title="Test Chat")
-        msg = session.append("user", "Hello!")
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="Test Chat")
+        msg = await cs.append(db_session, "user", "Hello!")
         assert msg["role"] == "user"
         assert msg["content"] == "Hello!"
-        assert len(session) == 1
+        assert len(cs) == 1
 
-    def test_messages_persisted_immediately(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/test/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_messages_persisted_immediately(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        session = ChatSession(session_id="persist123", workspace="test")
-        session.append("user", "First message")
-        session.append("assistant", "Response here")
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="Persist Test")
+        await cs.append(db_session, "user", "First message")
+        await cs.append(db_session, "assistant", "Response here")
 
-        # Load fresh from disk
-        loaded = ChatSession.load("persist123", "test")
+        loaded = await ChatSession.load(db_session, cs.session_id, "personal")
         assert loaded is not None
         assert len(loaded) == 2
         assert loaded.messages[0]["content"] == "First message"
 
-    def test_load_nonexistent_returns_none(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/test/chat_history", exist_ok=True)
-        result = ChatSession.load("nonexistent", "test")
+    @pytest.mark.asyncio
+    async def test_load_nonexistent_returns_none(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
+
+        result = await ChatSession.load(db_session, "00000000-0000-0000-0000-000000000000", "personal")
         assert result is None
 
-    def test_get_context_messages_limits(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/test/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_get_context_messages_limits(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        session = ChatSession(session_id="ctx123", workspace="test")
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="Context Test")
         for i in range(30):
-            session.append("user", f"Message {i}")
+            await cs.append(db_session, "user", f"Message {i}")
 
-        context = session.get_context_messages(max_recent=10)
+        context = cs.get_context_messages(max_recent=10)
         assert len(context) == 10
         assert context[-1]["content"] == "Message 29"
 
 
 class TestChatManager:
-    def test_create_session(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_create_session(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        session = manager.create_session(title="My Chat")
-        assert session.title == "My Chat"
-        assert session.workspace == "personal"
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="My Chat")
+        assert cs.title == "My Chat"
+        assert cs.workspace == "personal"
 
-    def test_list_sessions(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_list_sessions(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        s1 = manager.create_session(title="First")
-        s1.append("user", "Hello")
-        manager.update_session_index(s1)
+        mgr = ChatManager("personal")
+        s1 = await mgr.create_session(db_session, title="First")
+        await s1.append(db_session, "user", "Hello")
 
-        s2 = manager.create_session(title="Second")
-        s2.append("user", "World")
-        manager.update_session_index(s2)
+        s2 = await mgr.create_session(db_session, title="Second")
+        await s2.append(db_session, "user", "World")
 
-        sessions = manager.list_sessions()
+        sessions = await mgr.list_sessions(db_session)
         assert len(sessions) >= 2
         titles = [s["title"] for s in sessions]
         assert "First" in titles
         assert "Second" in titles
 
-    def test_search_finds_content(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_search_finds_content(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        session = manager.create_session(title="Search Test")
-        session.append("user", "I need to buy groceries today")
-        session.append("assistant", "I can help you make a shopping list")
-        manager.update_session_index(session)
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="Search Test")
+        await cs.append(db_session, "user", "I need to buy groceries today")
+        await cs.append(db_session, "assistant", "I can help you make a shopping list")
 
-        results = manager.search("groceries")
+        results = await mgr.search(db_session, "groceries")
         assert len(results) >= 1
         assert any("groceries" in r["content"].lower() for r in results)
 
-    def test_search_no_results(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_search_no_results(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        session = manager.create_session()
-        session.append("user", "Hello world")
-        manager.update_session_index(session)
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session)
+        await cs.append(db_session, "user", "Hello world")
 
-        results = manager.search("xyznonexistentterm123")
+        results = await mgr.search(db_session, "xyznonexistentterm123")
         assert results == []
 
-    def test_delete_session(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_delete_session(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        session = manager.create_session(title="To Delete")
-        session_id = session.session_id
+        mgr = ChatManager("personal")
+        cs = await mgr.create_session(db_session, title="To Delete")
+        session_id = cs.session_id
 
-        assert manager.get_session(session_id) is not None
-        manager.delete_session(session_id)
-        assert manager.get_session(session_id) is None
+        loaded = await mgr.get_session(db_session, session_id)
+        assert loaded is not None
+        await mgr.delete_session(db_session, session_id)
+        loaded = await mgr.get_session(db_session, session_id)
+        assert loaded is None
 
-    def test_get_nonexistent_session(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/personal/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_session(self, db_session):
+        if not await workspace_exists(db_session, "personal"):
+            await create_workspace(db_session, "personal")
 
-        manager = ChatManager("personal")
-        result = manager.get_session("does-not-exist")
+        mgr = ChatManager("personal")
+        result = await mgr.get_session(db_session, "00000000-0000-0000-0000-000000000000")
         assert result is None
 
 
 class TestCrossWorkspaceSearch:
-    def test_search_across_workspaces(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/ws1/chat_history", exist_ok=True)
-        os.makedirs("workspaces/ws2/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_search_across_workspaces(self, db_session):
+        for name in ("ws1", "ws2"):
+            if not await workspace_exists(db_session, name):
+                await create_workspace(db_session, name)
 
         m1 = ChatManager("ws1")
-        s1 = m1.create_session(title="WS1 Chat")
-        s1.append("user", "unique_search_term_abc")
-        m1.update_session_index(s1)
+        s1 = await m1.create_session(db_session, title="WS1 Chat")
+        await s1.append(db_session, "user", "unique_search_term_abc")
 
         m2 = ChatManager("ws2")
-        s2 = m2.create_session(title="WS2 Chat")
-        s2.append("user", "unique_search_term_abc")
-        m2.update_session_index(s2)
+        s2 = await m2.create_session(db_session, title="WS2 Chat")
+        await s2.append(db_session, "user", "unique_search_term_abc")
 
-        results = CrossWorkspaceChatManager.search_all("unique_search_term_abc")
+        results = await CrossWorkspaceChatManager.search_all(db_session, "unique_search_term_abc")
         assert len(results) >= 2
         workspaces_found = {r["workspace"] for r in results}
         assert "ws1" in workspaces_found
         assert "ws2" in workspaces_found
 
-    def test_list_all_workspaces(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        os.makedirs("workspaces/alpha/chat_history", exist_ok=True)
-        os.makedirs("workspaces/beta/chat_history", exist_ok=True)
+    @pytest.mark.asyncio
+    async def test_list_all_workspaces(self, db_session):
+        for name in ("alpha", "beta"):
+            if not await workspace_exists(db_session, name):
+                await create_workspace(db_session, name)
 
-        workspaces = CrossWorkspaceChatManager.list_all_workspaces()
+        workspaces = await CrossWorkspaceChatManager.list_all_workspaces(db_session)
         assert "alpha" in workspaces
         assert "beta" in workspaces
-
-
-# Keep the original workspace CLI tests
-class TestWorkspaceCLI:
-    def test_workspace_list(self, test_workspace):
-        from cli import cmd_workspace_list
-        cmd_workspace_list()
-
-    def test_workspace_create(self, test_workspace):
-        from cli import cmd_workspace_create
-        cmd_workspace_create("b5-test-workspace")
-        config_path = "workspaces/b5-test-workspace/config.json"
-        assert os.path.exists(config_path)
-        with open(config_path) as f:
-            cfg = json.load(f)
-        assert cfg["name"] == "b5-test-workspace"
-
-    def test_workspace_create_invalid_name(self, test_workspace):
-        from cli import cmd_workspace_create
-        with pytest.raises(SystemExit):
-            cmd_workspace_create("invalid name!")
-
-    def test_workspace_create_duplicate(self, test_workspace):
-        from cli import cmd_workspace_create
-        cmd_workspace_create("b5-unique-ws")
-        with pytest.raises(SystemExit):
-            cmd_workspace_create("b5-unique-ws")

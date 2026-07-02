@@ -1,7 +1,7 @@
 """Tests for SentenceBuffer and stream_sentences."""
 import pytest
 
-from core.pipeline.sentence_buffer import SentenceBuffer, stream_sentences
+from core.pipeline.sentence_buffer import SentenceBuffer, SentenceChunk, stream_sentences
 
 
 class TestSentenceBufferFeed:
@@ -112,10 +112,25 @@ class TestStreamSentences:
                 yield t
 
         result = []
-        async for sentence in stream_sentences(tokens()):
-            result.append(sentence)
+        async for chunk in stream_sentences(tokens()):
+            result.append(chunk)
 
-        assert result == ["Hello world."]
+        assert len(result) == 1
+        assert result[0].text == "Hello world."
+        assert result[0].language is None
+
+    @pytest.mark.asyncio
+    async def test_language_propagated(self):
+        async def tokens():
+            for t in ["Olá.", " Tudo bem?"]:
+                yield t
+
+        result = []
+        async for chunk in stream_sentences(tokens(), language="pt"):
+            result.append(chunk)
+
+        assert len(result) == 2
+        assert all(c.language == "pt" for c in result)
 
     @pytest.mark.asyncio
     async def test_multiple_sentences(self):
@@ -124,10 +139,11 @@ class TestStreamSentences:
                 yield t
 
         result = []
-        async for sentence in stream_sentences(tokens()):
-            result.append(sentence)
+        async for chunk in stream_sentences(tokens()):
+            result.append(chunk)
 
         assert len(result) == 3
+        assert [c.text for c in result] == ["First.", "Second.", "Third."]
 
     @pytest.mark.asyncio
     async def test_remaining_flushed_at_end(self):
@@ -136,10 +152,11 @@ class TestStreamSentences:
                 yield t
 
         result = []
-        async for sentence in stream_sentences(tokens()):
-            result.append(sentence)
+        async for chunk in stream_sentences(tokens()):
+            result.append(chunk)
 
-        assert result == ["No punctuation"]
+        assert len(result) == 1
+        assert result[0].text == "No punctuation"
 
     @pytest.mark.asyncio
     async def test_empty_stream(self):
@@ -148,8 +165,8 @@ class TestStreamSentences:
             yield  # make it a generator
 
         result = []
-        async for sentence in stream_sentences(tokens()):
-            result.append(sentence)
+        async for chunk in stream_sentences(tokens()):
+            result.append(chunk)
 
         assert result == []
 
@@ -159,8 +176,8 @@ class TestStreamSentences:
             yield "A" * 25  # > force_flush_at=20
 
         result = []
-        async for sentence in stream_sentences(tokens(), force_flush_at=20):
-            result.append(sentence)
+        async for chunk in stream_sentences(tokens(), force_flush_at=20):
+            result.append(chunk)
 
         assert len(result) == 1
-        assert len(result[0]) == 25
+        assert len(result[0].text) == 25
