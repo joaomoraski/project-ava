@@ -67,8 +67,6 @@ class AppConfig(BaseModel):
     tts_language: str = "pt"
     default_mode: ModeEnum = ModeEnum.companion
     default_workspace: str = "personal"
-    meeting_hotkey: str = "ctrl+shift+m"
-    toggle_avatar_hotkey: str = "ctrl+shift+a"
     log_level: str = "INFO"
 
 
@@ -78,6 +76,8 @@ class ModeStatus(BaseModel):
     mode: ModeEnum
     workspace: str
     changed_at: datetime | None = None
+    meeting_id: str | None = None
+    pre_meeting_mode: str | None = None
 
 
 class ModeSwitchRequest(BaseModel):
@@ -240,7 +240,13 @@ class McpServerInfo(BaseModel):
     status: McpServerStatus = McpServerStatus.stopped
     tools_count: int = 0
     uptime_seconds: float | None = None
-    last_error: str | None = None
+    error: str | None = None
+    last_error: str | None = None  # alias kept for backward compat
+    # OAuth metadata (presence indicates OAuth is configured for this server)
+    oauth_url: str | None = None
+    oauth_client_id: str | None = None
+    oauth_scopes: str | None = None
+    oauth_client_secret_ref: str | None = None
 
 
 class McpServerCreate(BaseModel):
@@ -250,6 +256,11 @@ class McpServerCreate(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     description: str = ""
     auto_start: bool = False
+    # OAuth fields — only needed for servers that require OAuth authorization
+    oauth_url: str | None = None
+    oauth_client_id: str | None = None
+    oauth_scopes: str | None = None
+    oauth_client_secret_ref: str | None = None  # name of secret in vault
 
 
 class McpTool(BaseModel):
@@ -276,6 +287,226 @@ class SecretPreview(BaseModel):
 class WsMessage(BaseModel):
     type: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+# ─── Meetings ─────────────────────────────────────────────────────────────────
+
+class MeetingCreate(BaseModel):
+    title: str = ""
+    workspace: str = "personal"
+    participants: list[str] = []
+    calendar_event_id: str | None = None
+
+
+class MeetingUpdate(BaseModel):
+    title: str | None = None
+    participants: list[str] | None = None
+    summary: str | None = None
+    status: str | None = None
+
+
+class MeetingResponse(BaseModel):
+    id: str
+    workspace_id: str
+    title: str
+    participants: list[str]
+    transcript: str
+    summary: str | None
+    decisions: list[dict]
+    document_md: str | None
+    status: str
+    started_at: str
+    ended_at: str | None
+
+
+class MeetingPrepResponse(BaseModel):
+    past_meetings: list[dict]
+    open_action_items: list[dict]
+
+
+# ─── Action Items ─────────────────────────────────────────────────────────────
+
+class ActionItemCreate(BaseModel):
+    description: str
+    workspace: str = "personal"
+    meeting_id: str | None = None
+    owner: str | None = None
+    due_date: str | None = None
+
+
+class ActionItemUpdate(BaseModel):
+    description: str | None = None
+    owner: str | None = None
+    status: str | None = None
+    due_date: str | None = None
+
+
+class ActionItemResponse(BaseModel):
+    id: str
+    meeting_id: str | None
+    workspace_id: str
+    owner: str | None
+    description: str
+    status: str
+    due_date: str | None
+    completed_at: str | None
+    linked_item_id: str | None
+
+
+# ─── Notes ────────────────────────────────────────────────────────────────────
+
+class NoteCreate(BaseModel):
+    title: str
+    content: str = ""
+    workspace: str = "personal"
+    tags: list[str] = []
+
+
+class NoteUpdate(BaseModel):
+    title: str | None = None
+    content: str | None = None
+    tags: list[str] | None = None
+
+
+class NoteResponse(BaseModel):
+    id: str
+    workspace_id: str
+    title: str
+    content: str
+    tags: list[str]
+    created_at: str
+    updated_at: str
+
+
+# ─── Todos ────────────────────────────────────────────────────────────────────
+
+class TodoCreate(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "medium"
+    due_date: str | None = None
+    workspace: str = "personal"
+
+
+class TodoUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    due_date: str | None = None
+
+
+class TodoResponse(BaseModel):
+    id: str
+    workspace_id: str | None
+    title: str
+    description: str
+    priority: str
+    status: str
+    due_date: str | None
+    completed_at: str | None
+    created_at: str
+    updated_at: str
+
+
+# ─── Alerts ───────────────────────────────────────────────────────────────────
+
+class AlertCreate(BaseModel):
+    title: str
+    message: str = ""
+    trigger_at: str  # ISO 8601
+    repeat_rule: str = "once"
+    workspace: str = "personal"
+
+
+class AlertUpdate(BaseModel):
+    title: str | None = None
+    message: str | None = None
+    trigger_at: str | None = None
+    repeat_rule: str | None = None
+    status: str | None = None
+
+
+class AlertResponse(BaseModel):
+    id: str
+    workspace_id: str | None
+    title: str
+    message: str
+    trigger_at: str
+    repeat_rule: str
+    status: str
+    fired_at: str | None
+    created_at: str
+
+
+# ─── Contexts ─────────────────────────────────────────────────────────────────
+
+class ContextCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str = ""
+    color: str = "#6366f1"
+    workspace: str = "personal"
+
+
+class ContextUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=128)
+    description: str | None = None
+    color: str | None = None
+
+
+class ContextResponse(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    description: str
+    color: str
+    created_at: str
+
+
+class ContextLinkRequest(BaseModel):
+    item_type: str  # meeting, note, todo, alert, action_item
+    item_id: str
+
+
+class ContextLinkResponse(BaseModel):
+    id: str
+    context_id: str
+    item_type: str
+    item_id: str
+    auto_linked: bool = False
+    created_at: str
+
+
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+class JobStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class JobTaskResponse(BaseModel):
+    id: str
+    job_type: str
+    target_type: str | None = None
+    target_id: str | None = None
+    workspace_id: str
+    status: JobStatus
+    progress: float
+    progress_message: str | None = None
+    procrastinate_job_id: int | None = None
+    error: str | None = None
+    result_payload: dict[str, Any] | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class JobsListResponse(BaseModel):
+    jobs: list[JobTaskResponse]
+    count: int
 
 
 # ─── Generic responses ────────────────────────────────────────────────────────

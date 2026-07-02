@@ -1,7 +1,7 @@
 """Standalone WebSocket server on port 8472.
 
 Runs as a separate process alongside the FastAPI app.
-Handles real-time audio streaming, status updates, and avatar events.
+Handles real-time status updates for dashboard clients.
 
 Run:
     python ws_server.py
@@ -26,25 +26,21 @@ from core.logging import setup_logging
 setup_logging(settings.log_level)
 logger = logging.getLogger("ws_server")
 
-# Connected clients: {id -> {ws, type}}
+# Connected clients: {id -> {ws}}
 _clients: dict[str, dict] = {}
 
 
 async def handler(websocket: WebSocketServerProtocol, path: str) -> None:
     import uuid
     client_id = str(uuid.uuid4())
-    # Determine client type from query param
-    query = websocket.request.path if hasattr(websocket, "request") else ""
-    client_type = "avatar" if "avatar" in query else "dashboard"
 
-    _clients[client_id] = {"ws": websocket, "type": client_type}
-    logger.info(f"WS client connected: {client_id} ({client_type}) — total: {len(_clients)}")
+    _clients[client_id] = {"ws": websocket}
+    logger.info(f"WS client connected: {client_id} — total: {len(_clients)}")
 
     try:
         await websocket.send(json.dumps({
             "type": "connected",
             "client_id": client_id,
-            "client_type": client_type,
         }))
 
         async for message in websocket:
@@ -61,25 +57,19 @@ async def handler(websocket: WebSocketServerProtocol, path: str) -> None:
         logger.info(f"WS client disconnected: {client_id} — total: {len(_clients)}")
 
 
-async def broadcast(message: dict, avatar_only: bool = False) -> None:
+async def broadcast(message: dict) -> None:
     """Broadcast a message to all connected clients."""
     if not _clients:
         return
     payload = json.dumps(message)
     dead: list[str] = []
     for cid, client in list(_clients.items()):
-        if avatar_only and client["type"] != "avatar":
-            continue
         try:
             await client["ws"].send(payload)
         except Exception:
             dead.append(cid)
     for cid in dead:
         _clients.pop(cid, None)
-
-
-def has_avatar_client() -> bool:
-    return any(c["type"] == "avatar" for c in _clients.values())
 
 
 async def main() -> None:

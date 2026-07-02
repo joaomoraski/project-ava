@@ -1,13 +1,51 @@
-"""Workspace management utilities — fully expanded in B6."""
+"""Workspace management — PostgreSQL backend."""
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import Any
 
-WORKSPACES_DIR = "workspaces"
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.db.models import Workspace
+
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
+RESERVED_NAMES = {"api", "system", "admin", "config", "health"}
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "system_prompt": (
+        "You are Ava, a personal AI assistant and rubber duck debugging partner. "
+        "You have access to the user's knowledge base, meeting transcripts, todos, "
+        "alerts/reminders, calendar, and web search. "
+        "Help the user think through problems, organize their work, and stay on top of their schedule. "
+        "When the user asks you to create reminders, todos, or search their knowledge, use your tools proactively. "
+        "IMPORTANT: Always respond in the same language the user is writing or speaking in. "
+        "If they write in Portuguese, respond in Portuguese. If English, respond in English. Match their language exactly."
+    ),
+    "stt_gate_mode": "smart",
+    "proactivity": "medium",
+    "tools_enabled": [
+        "web_search",
+        "knowledge_search",
+        "search_meetings",
+        "get_action_items",
+        "meeting_prep",
+        "search_chat_history",
+        "manage_todos",
+        "manage_alerts",
+        "get_calendar_events",
+        "get_context",
+    ],
+    "plugins_enabled": ["context7"],
+    "collections": ["notes", "documents"],
+    "transcription_priority": {
+        "mode": "smart",
+        "high_priority_topics": [],
+        "low_priority_topics": [],
+        "behavior": "",
+    },
+    "knowledge_seeds": [],
+}
 
 
 def validate_name(name: str) -> None:
@@ -16,63 +54,83 @@ def validate_name(name: str) -> None:
             f"Invalid workspace name '{name}'. "
             "Use alphanumeric characters and hyphens (1-64 chars)."
         )
-    reserved = {"api", "system", "admin", "config", "health"}
-    if name.lower() in reserved:
+    if name.lower() in RESERVED_NAMES:
         raise ValueError(f"'{name}' is a reserved name.")
 
 
-def workspace_exists(name: str) -> bool:
-    return os.path.exists(os.path.join(WORKSPACES_DIR, name, "config.json"))
+async def workspace_exists(session: AsyncSession, name: str) -> bool:
+    result = await session.execute(select(Workspace.id).where(Workspace.name == name))
+    return result.scalar_one_or_none() is not None
 
 
-def load_config(name: str) -> dict[str, Any]:
-    config_path = os.path.join(WORKSPACES_DIR, name, "config.json")
-    if not os.path.exists(config_path):
+async def load_config(session: AsyncSession, name: str) -> dict[str, Any]:
+    result = await session.execute(select(Workspace).where(Workspace.name == name))
+    ws = result.scalar_one_or_none()
+    if ws is None:
         raise FileNotFoundError(f"Workspace '{name}' not found.")
-    with open(config_path) as f:
-        return json.load(f)
+    return _ws_to_dict(ws)
 
 
-def save_config(name: str, config: dict[str, Any]) -> None:
-    config_path = os.path.join(WORKSPACES_DIR, name, "config.json")
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
+async def save_config(session: AsyncSession, name: str, config: dict[str, Any]) -> None:
+    result = await session.execute(select(Workspace).where(Workspace.name == name))
+    ws = result.scalar_one_or_none()
+    if ws is None:
+        raise FileNotFoundError(f"Workspace '{name}' not found.")
+    for key, value in config.items():
+        if key not in ("name", "id", "created_at", "updated_at") and hasattr(ws, key):
+            setattr(ws, key, value)
+    await session.commit()
 
 
-def list_workspaces() -> list[str]:
-    if not os.path.exists(WORKSPACES_DIR):
-        return []
-    return [
-        d for d in os.listdir(WORKSPACES_DIR)
-        if os.path.isdir(os.path.join(WORKSPACES_DIR, d))
-        and os.path.exists(os.path.join(WORKSPACES_DIR, d, "config.json"))
-    ]
+async def list_workspaces(session: AsyncSession) -> list[str]:
+    result = await session.execute(select(Workspace.name).order_by(Workspace.name))
+    return [row[0] for row in result.all()]
 
 
-def create_workspace(name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+async def create_workspace(
+    session: AsyncSession,
+    name: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     validate_name(name)
-    if workspace_exists(name):
+    if await workspace_exists(session, name):
         raise ValueError(f"Workspace '{name}' already exists.")
-    os.makedirs(os.path.join(WORKSPACES_DIR, name, "chroma_db"), exist_ok=True)
-    os.makedirs(os.path.join(WORKSPACES_DIR, name, "chat_history"), exist_ok=True)
-    default_config: dict[str, Any] = {
-        "name": name,
-        "system_prompt": "",
-        "stt_gate_mode": "smart",
-        "proactivity": "medium",
-        "tools_enabled": ["web_search"],
-        "plugins_enabled": [],
-        "collections": ["notes", "documents"],
-        "transcription_priority": {
-            "mode": "smart",
-            "high_priority_topics": [],
-            "low_priority_topics": [],
-            "behavior": "",
-        },
-        "knowledge_seeds": [],
-    }
+
+    merged = {**DEFAULT_CONFIG}
     if config:
-        default_config.update(config)
-    save_config(name, default_config)
-    return default_config
+        merged.update(config)
+
+    ws = Workspace(
+        name=name,
+        system_prompt=merged["system_prompt"],
+        stt_gate_mode=merged["stt_gate_mode"],
+        proactivity=merged["proactivity"],
+        tools_enabled=merged["tools_enabled"],
+        plugins_enabled=merged["plugins_enabled"],
+        collections=merged["collections"],
+        transcription_priority=merged["transcription_priority"],
+        knowledge_seeds=merged["knowledge_seeds"],
+    )
+    session.add(ws)
+    await session.commit()
+    await session.refresh(ws)
+    return _ws_to_dict(ws)
+
+
+async def delete_workspace(session: AsyncSession, name: str) -> None:
+    await session.execute(delete(Workspace).where(Workspace.name == name))
+    await session.commit()
+
+
+def _ws_to_dict(ws: Workspace) -> dict[str, Any]:
+    return {
+        "name": ws.name,
+        "system_prompt": ws.system_prompt or "",
+        "stt_gate_mode": ws.stt_gate_mode or "smart",
+        "proactivity": ws.proactivity or "medium",
+        "tools_enabled": ws.tools_enabled or [],
+        "plugins_enabled": ws.plugins_enabled or [],
+        "collections": ws.collections or [],
+        "transcription_priority": ws.transcription_priority or {},
+        "knowledge_seeds": ws.knowledge_seeds or [],
+    }

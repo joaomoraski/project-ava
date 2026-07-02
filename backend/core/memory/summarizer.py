@@ -10,14 +10,20 @@ from typing import Any
 
 logger = logging.getLogger("core.memory.summarizer")
 
-SUMMARY_PROMPT = """Summarize the following conversation history concisely.
-Focus on: key decisions made, important information shared, topics discussed.
-Be brief — this summary replaces older messages to save context space.
+SUMMARY_PROMPT = """Summarize the following conversation concisely.
+
+CRITICAL: preserve every proper noun the user mentioned — names of people,
+projects, files, meetings, todos, places, products. List them verbatim at
+the top of the summary under "Entities:". Never paraphrase entity names.
+
+Then in 3-5 sentences, summarize what was discussed.
 
 Conversation:
 {history}
 
-Summary:"""
+Output format:
+Entities: <comma-separated list>
+Summary: <3-5 sentences>"""
 
 
 class ConversationSummarizer:
@@ -36,7 +42,7 @@ class ConversationSummarizer:
             messages: list of {'role': str, 'content': str} dicts
 
         Returns:
-            Summary string, or a simple concatenation if LLM unavailable.
+            Summary string (Entities: ... / Summary: ... format), or fallback.
         """
         if not messages:
             return ""
@@ -47,9 +53,8 @@ class ConversationSummarizer:
         )
 
         if not self._llm:
-            # Fallback: simple truncation without LLM
             logger.debug("No LLM for summarization — using truncation fallback.")
-            return f"[Previous conversation — {len(messages)} messages exchanged]"
+            return f"Entities: \nSummary: {len(messages)} messages exchanged (no LLM available to summarize)."
 
         prompt = SUMMARY_PROMPT.format(history=history_text)
 
@@ -60,7 +65,19 @@ class ConversationSummarizer:
             return summary.strip()
         except Exception as e:
             logger.error(f"Summarization failed: {e}")
-            return f"[Previous conversation — {len(messages)} messages exchanged]"
+            return f"Entities: \nSummary: {len(messages)} messages exchanged (summarization failed)."
+
+    @staticmethod
+    def _parse_summary(raw: str) -> tuple[str, str]:
+        """Parse 'Entities: ...\nSummary: ...' format. Returns (entities, summary_text)."""
+        entities = ""
+        summary_text = raw
+        for line in raw.splitlines():
+            if line.startswith("Entities:"):
+                entities = line[len("Entities:"):].strip()
+            elif line.startswith("Summary:"):
+                summary_text = line[len("Summary:"):].strip()
+        return entities, summary_text
 
     def build_context(
         self,
@@ -84,10 +101,13 @@ class ConversationSummarizer:
         context: list[dict[str, Any]] = []
 
         if summary and older_count > 0:
-            context.append({
-                "role": "system",
-                "content": f"[Conversation summary — {older_count} earlier messages]\n{summary}",
-            })
+            entities, summary_text = self._parse_summary(summary)
+            content = (
+                f"Earlier conversation summary ({older_count} older messages compacted).\n"
+                f"Entities mentioned: {entities}.\n"
+                f"Summary: {summary_text}"
+            )
+            context.append({"role": "system", "content": content})
         elif older_count > 0 and not summary:
             context.append({
                 "role": "system",

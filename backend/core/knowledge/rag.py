@@ -1,6 +1,6 @@
-"""RAG pipeline: ChromaDB vector store + nomic-embed-text + cross-encoder reranking.
+"""RAG pipeline: pgvector + nomic-embed-text + cross-encoder reranking.
 
-Vector search returns top-K candidates.
+Vector search via PostgreSQL cosine distance operator (<=>).
 Cross-encoder reranker reranks and returns top-5.
 """
 from __future__ import annotations
@@ -9,75 +9,27 @@ import logging
 import uuid
 from typing import Any
 
+from sqlalchemy import select, delete, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.config import settings
+from core.db.models import KnowledgeChunk, Workspace
+from core.db.embeddings import generate_embedding, generate_embeddings_batch
 
 logger = logging.getLogger("core.knowledge.rag")
 
-COLLECTION_PREFIX = "ava"
-TOP_K_RETRIEVAL = 20   # initial vector search candidates
-TOP_K_RERANK = 5       # final results after reranking
+TOP_K_RETRIEVAL = 20
+TOP_K_RERANK = 5
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
-def _chroma_path(workspace: str) -> str:
-    return f"workspaces/{workspace}/chroma_db"
-
-
-def _global_chroma_path() -> str:
-    return "knowledge/chroma_db"
-
-
 class KnowledgeBase:
-    """Per-workspace ChromaDB collection with nomic-embed-text embeddings.
-
-    Provides:
-    - add_chunks(): index document chunks
-    - search(): semantic search with optional cross-encoder reranking
-    - delete_source(): remove all chunks from a specific source
-    """
+    """Per-workspace knowledge base backed by pgvector."""
 
     def __init__(self, workspace: str, collection_name: str = "documents") -> None:
         self._workspace = workspace
         self._collection_name = collection_name
-        self._client = None
-        self._collection = None
         self._reranker = None
-        self._embedding_fn = None
-
-    def _get_client(self):
-        if self._client is None:
-            try:
-                import chromadb
-                self._client = chromadb.PersistentClient(path=_chroma_path(self._workspace))
-            except ImportError:
-                raise ImportError("chromadb not installed. Run: pip install chromadb")
-        return self._client
-
-    def _get_embedding_fn(self):
-        if self._embedding_fn is None:
-            try:
-                from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
-                self._embedding_fn = OllamaEmbeddingFunction(
-                    url=f"{settings.ollama_base_url}/api/embeddings",
-                    model_name=settings.embed_model,
-                )
-            except Exception as e:
-                logger.warning(f"Ollama embedding function unavailable: {e}. Using default.")
-                self._embedding_fn = None  # chroma will use default
-        return self._embedding_fn
-
-    def _get_collection(self):
-        if self._collection is None:
-            client = self._get_client()
-            embed_fn = self._get_embedding_fn()
-            kwargs: dict[str, Any] = {
-                "name": f"{COLLECTION_PREFIX}_{self._collection_name}",
-                "metadata": {"workspace": self._workspace},
-            }
-            if embed_fn:
-                kwargs["embedding_function"] = embed_fn
-            self._collection = client.get_or_create_collection(**kwargs)
-        return self._collection
 
     def _get_reranker(self):
         if self._reranker is None:
@@ -87,14 +39,18 @@ class KnowledgeBase:
                 logger.debug("Cross-encoder reranker loaded.")
             except ImportError:
                 logger.warning("sentence-transformers not installed — reranking disabled.")
-                self._reranker = None
             except Exception as e:
                 logger.warning(f"Reranker load failed: {e} — reranking disabled.")
-                self._reranker = None
         return self._reranker
 
-    def add_chunks(self, chunks: list[dict]) -> int:
-        """Index chunks into ChromaDB.
+    async def _get_workspace_id(self, session: AsyncSession) -> uuid.UUID | None:
+        result = await session.execute(
+            select(Workspace.id).where(Workspace.name == self._workspace)
+        )
+        return result.scalar_one_or_none()
+
+    async def add_chunks(self, session: AsyncSession, chunks: list[dict]) -> int:
+        """Index chunks into pgvector.
 
         Args:
             chunks: list of dicts with 'content', 'source', 'source_type', 'file_name'
@@ -105,66 +61,90 @@ class KnowledgeBase:
         if not chunks:
             return 0
 
-        collection = self._get_collection()
-        documents = [c["content"] for c in chunks]
-        metadatas = [
-            {
-                "source": c.get("source", ""),
-                "source_type": c.get("source_type", "file"),
-                "file_name": c.get("file_name", ""),
-                "workspace": self._workspace,
-            }
-            for c in chunks
-        ]
-        ids = [str(uuid.uuid4()) for _ in chunks]
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
+            logger.error(f"Workspace '{self._workspace}' not found.")
+            return 0
+
+        texts = [c["content"] for c in chunks]
 
         try:
-            collection.add(documents=documents, metadatas=metadatas, ids=ids)
+            embeddings = await generate_embeddings_batch(texts)
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            return 0
+
+        try:
+            for chunk, embedding in zip(chunks, embeddings):
+                row = KnowledgeChunk(
+                    workspace_id=workspace_id,
+                    collection=self._collection_name,
+                    content=chunk["content"],
+                    embedding=embedding,
+                    source=chunk.get("source", ""),
+                    source_type=chunk.get("source_type", "file"),
+                    file_name=chunk.get("file_name", ""),
+                )
+                session.add(row)
+
+            await session.commit()
             logger.info(f"Indexed {len(chunks)} chunks into {self._workspace}/{self._collection_name}")
             return len(chunks)
         except Exception as e:
-            logger.error(f"ChromaDB add failed: {e}")
+            await session.rollback()
+            logger.error(f"pgvector add failed: {e}")
             return 0
 
-    def search(self, query: str, top_k: int = TOP_K_RERANK) -> list[dict]:
-        """Semantic search with optional cross-encoder reranking.
-
-        Args:
-            query: search query
-            top_k: final number of results to return
-
-        Returns:
-            List of result dicts with 'content', 'source', 'score', 'workspace'
-        """
-        collection = self._get_collection()
+    async def search(self, session: AsyncSession, query: str, top_k: int = TOP_K_RERANK) -> list[dict]:
+        """Semantic search with optional cross-encoder reranking."""
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
+            return []
 
         try:
-            n_results = min(TOP_K_RETRIEVAL, collection.count())
-            if n_results == 0:
-                return []
-
-            results = collection.query(
-                query_texts=[query],
-                n_results=n_results,
-                include=["documents", "metadatas", "distances"],
-            )
+            query_embedding = await generate_embedding(query)
         except Exception as e:
-            logger.error(f"ChromaDB query failed: {e}")
+            logger.error(f"Query embedding failed: {e}")
             return []
 
-        docs = results["documents"][0]
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        if not docs:
+        try:
+            # pgvector cosine distance: <=> operator
+            distance = KnowledgeChunk.embedding.cosine_distance(query_embedding)
+            result = await session.execute(
+                select(
+                    KnowledgeChunk.content,
+                    KnowledgeChunk.source,
+                    KnowledgeChunk.source_type,
+                    KnowledgeChunk.file_name,
+                    distance.label("distance"),
+                )
+                .where(
+                    KnowledgeChunk.workspace_id == workspace_id,
+                    KnowledgeChunk.embedding.isnot(None),
+                )
+                .order_by(distance)
+                .limit(TOP_K_RETRIEVAL)
+            )
+            rows = result.all()
+        except Exception as e:
+            logger.error(f"pgvector query failed: {e}")
             return []
+
+        if not rows:
+            return []
+
+        docs = [r.content for r in rows]
+        metas = [{"source": r.source, "source_type": r.source_type} for r in rows]
+        distances = [r.distance for r in rows]
 
         # Rerank with cross-encoder if available
         reranker = self._get_reranker()
         if reranker and len(docs) > 1:
             try:
+                import asyncio
+                loop = asyncio.get_event_loop()
                 pairs = [(query, doc) for doc in docs]
-                scores = reranker.predict(pairs)
+                scores = await loop.run_in_executor(None, reranker.predict, pairs)
                 ranked = sorted(zip(scores, docs, metas), key=lambda x: x[0], reverse=True)
                 docs = [r[1] for r in ranked[:top_k]]
                 metas = [r[2] for r in ranked[:top_k]]
@@ -190,44 +170,60 @@ class KnowledgeBase:
             for doc, meta, score in zip(docs, metas, scores_final)
         ]
 
-    def delete_source(self, source: str) -> int:
-        """Remove all chunks from a specific source URL or file path."""
-        collection = self._get_collection()
-        try:
-            results = collection.get(where={"source": source})
-            if results["ids"]:
-                collection.delete(ids=results["ids"])
-                logger.info(f"Deleted {len(results['ids'])} chunks from source: {source}")
-                return len(results["ids"])
-            return 0
-        except Exception as e:
-            logger.error(f"delete_source failed for {source}: {e}")
+    async def delete_source(self, session: AsyncSession, source: str) -> int:
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
             return 0
 
-    def count(self) -> int:
-        """Return total number of indexed chunks."""
-        try:
-            return self._get_collection().count()
-        except Exception:
-            return 0
+        result = await session.execute(
+            delete(KnowledgeChunk)
+            .where(
+                KnowledgeChunk.workspace_id == workspace_id,
+                KnowledgeChunk.source == source,
+            )
+            .returning(KnowledgeChunk.id)
+        )
+        await session.commit()
+        deleted = len(result.all())
+        if deleted:
+            logger.info(f"Deleted {deleted} chunks from source: {source}")
+        return deleted
 
-    def list_sources(self) -> list[dict]:
-        """Return deduplicated list of indexed sources with chunk counts."""
-        try:
-            collection = self._get_collection()
-            results = collection.get(include=["metadatas"])
-            source_counts: dict[str, dict] = {}
-            for meta in results.get("metadatas", []):
-                source = meta.get("source", "")
-                if source not in source_counts:
-                    source_counts[source] = {
-                        "source": source,
-                        "source_type": meta.get("source_type", ""),
-                        "file_name": meta.get("file_name", ""),
-                        "chunk_count": 0,
-                    }
-                source_counts[source]["chunk_count"] += 1
-            return list(source_counts.values())
-        except Exception as e:
-            logger.error(f"list_sources failed: {e}")
+    async def count(self, session: AsyncSession) -> int:
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
+            return 0
+        result = await session.execute(
+            select(func.count(KnowledgeChunk.id))
+            .where(KnowledgeChunk.workspace_id == workspace_id)
+        )
+        return result.scalar_one()
+
+    async def list_sources(self, session: AsyncSession) -> list[dict]:
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
             return []
+
+        result = await session.execute(
+            select(
+                KnowledgeChunk.source,
+                KnowledgeChunk.source_type,
+                KnowledgeChunk.file_name,
+                func.count(KnowledgeChunk.id).label("chunk_count"),
+            )
+            .where(KnowledgeChunk.workspace_id == workspace_id)
+            .group_by(
+                KnowledgeChunk.source,
+                KnowledgeChunk.source_type,
+                KnowledgeChunk.file_name,
+            )
+        )
+        return [
+            {
+                "source": row.source,
+                "source_type": row.source_type,
+                "file_name": row.file_name,
+                "chunk_count": row.chunk_count,
+            }
+            for row in result.all()
+        ]

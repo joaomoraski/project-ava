@@ -10,16 +10,19 @@ logger = logging.getLogger("tools.google_calendar")
 
 
 @tool
-def get_calendar_events(days_ahead: int = 7) -> str:
+async def get_calendar_events(days_ahead: int = 7) -> str:
     """Get upcoming Google Calendar events.
 
     Args:
         days_ahead: how many days ahead to fetch (default: 7)
     """
     try:
+        from core.db.engine import async_session
         from core.secrets.vault import SecretsVault
+
         vault = SecretsVault()
-        access_token = vault.get_secret("GOOGLE_ACCESS_TOKEN")
+        async with async_session() as session:
+            access_token = await vault.get_secret(session, "GOOGLE_ACCESS_TOKEN")
         if not access_token:
             return "Google Calendar not configured. Connect your Google account in the dashboard."
 
@@ -66,7 +69,7 @@ def get_calendar_events(days_ahead: int = 7) -> str:
 
 
 @tool
-def create_calendar_event(
+async def create_calendar_event(
     title: str,
     start_datetime: str,
     end_datetime: str,
@@ -81,9 +84,12 @@ def create_calendar_event(
         description: optional event description
     """
     try:
+        from core.db.engine import async_session
         from core.secrets.vault import SecretsVault
+
         vault = SecretsVault()
-        access_token = vault.get_secret("GOOGLE_ACCESS_TOKEN")
+        async with async_session() as session:
+            access_token = await vault.get_secret(session, "GOOGLE_ACCESS_TOKEN")
         if not access_token:
             return "Google Calendar not configured. Connect your Google account in the dashboard."
 

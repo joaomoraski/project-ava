@@ -1,21 +1,13 @@
-"""Plugin management API endpoints.
-
-GET    /api/plugins                 — list all plugins (installed + available)
-GET    /api/plugins/available       — list known installable presets
-POST   /api/plugins/install         — install a plugin
-DELETE /api/plugins/{name}          — uninstall plugin
-PUT    /api/plugins/{name}/config   — update plugin config/env vars
-POST   /api/plugins/{name}/enable   — enable for a workspace
-POST   /api/plugins/{name}/disable  — disable for a workspace
-GET    /api/plugins/{name}/status   — plugin health + available tools
-"""
+"""Plugin management API endpoints."""
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import OkResponse, PluginEnableRequest, PluginInstallRequest
+from core.db.engine import get_session
 from core.plugins.plugin_loader import (
     install_plugin,
     uninstall_plugin,
@@ -32,7 +24,6 @@ logger = logging.getLogger("api.plugins")
 
 @router.get("")
 async def list_plugins() -> dict:
-    """List installed plugins with their status per workspace."""
     installed = list_installed()
     for plugin in installed:
         server_status = mcp_manager.get_server_status(plugin["name"])
@@ -43,13 +34,11 @@ async def list_plugins() -> dict:
 
 @router.get("/available")
 async def list_available_plugins() -> dict:
-    """List all known installable plugin presets."""
     return {"presets": list_available()}
 
 
 @router.post("/install")
 async def install_plugin_endpoint(body: PluginInstallRequest) -> dict:
-    """Install a plugin by name (preset) or custom MCP config."""
     if not body.name and not body.mcp_config:
         raise HTTPException(status_code=422, detail="Provide either 'name' or 'mcp_config'.")
 
@@ -70,23 +59,16 @@ async def install_plugin_endpoint(body: PluginInstallRequest) -> dict:
 
 @router.delete("/{name}")
 async def uninstall_plugin_endpoint(name: str) -> OkResponse:
-    """Uninstall a plugin and remove its MCP server config."""
     uninstall_plugin(name)
     return OkResponse(message=f"Plugin '{name}' uninstalled.")
 
 
 @router.put("/{name}/config")
 async def configure_plugin(name: str, body: dict) -> OkResponse:
-    """Update plugin configuration (env vars, MCP server settings).
-
-    This updates the MCP server config for the plugin.
-    Env vars containing secrets should be set via /api/secrets/set instead.
-    """
     manifest = load_manifest(name)
     if not manifest:
         raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found.")
 
-    # Update MCP server config if provided
     if "command" in body or "args" in body or "env" in body:
         mcp_manager.update_server(name, {
             k: body[k] for k in ("command", "args", "env", "description") if k in body
@@ -96,44 +78,47 @@ async def configure_plugin(name: str, body: dict) -> OkResponse:
 
 
 @router.post("/{name}/enable")
-async def enable_plugin(name: str, body: PluginEnableRequest) -> OkResponse:
-    """Enable a plugin for a specific workspace."""
-    if not workspace_exists(body.workspace):
+async def enable_plugin(
+    name: str,
+    body: PluginEnableRequest,
+    session: AsyncSession = Depends(get_session),
+) -> OkResponse:
+    if not await workspace_exists(session, body.workspace):
         raise HTTPException(status_code=404, detail=f"Workspace '{body.workspace}' not found.")
 
     manifest = load_manifest(name)
     if not manifest:
         raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found.")
 
-    config = load_config(body.workspace)
+    config = await load_config(session, body.workspace)
     enabled = config.get("plugins_enabled", [])
     if name not in enabled:
         enabled.append(name)
-        config["plugins_enabled"] = enabled
-        save_config(body.workspace, config)
+        await save_config(session, body.workspace, {"plugins_enabled": enabled})
 
     return OkResponse(message=f"Plugin '{name}' enabled for workspace '{body.workspace}'.")
 
 
 @router.post("/{name}/disable")
-async def disable_plugin(name: str, body: PluginEnableRequest) -> OkResponse:
-    """Disable a plugin for a specific workspace."""
-    if not workspace_exists(body.workspace):
+async def disable_plugin(
+    name: str,
+    body: PluginEnableRequest,
+    session: AsyncSession = Depends(get_session),
+) -> OkResponse:
+    if not await workspace_exists(session, body.workspace):
         raise HTTPException(status_code=404, detail=f"Workspace '{body.workspace}' not found.")
 
-    config = load_config(body.workspace)
+    config = await load_config(session, body.workspace)
     enabled = config.get("plugins_enabled", [])
     if name in enabled:
         enabled.remove(name)
-        config["plugins_enabled"] = enabled
-        save_config(body.workspace, config)
+        await save_config(session, body.workspace, {"plugins_enabled": enabled})
 
     return OkResponse(message=f"Plugin '{name}' disabled for workspace '{body.workspace}'.")
 
 
 @router.get("/{name}/status")
 async def plugin_status(name: str) -> dict:
-    """Get plugin health, running status, and available tools."""
     manifest = load_manifest(name)
     if not manifest:
         raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found.")

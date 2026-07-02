@@ -1,15 +1,45 @@
 """Preflight startup checks."""
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import socket
 import logging
+from typing import TYPE_CHECKING
 
 import httpx
 
 from core.config import Settings
 
+if TYPE_CHECKING:
+    from core.memory.summarizer import ConversationSummarizer
+
 logger = logging.getLogger("core.startup")
+
+# Module-level summarizer singleton — set during startup, consumed by agent init.
+_summarizer: ConversationSummarizer | None = None
+
+
+def get_summarizer() -> ConversationSummarizer | None:
+    """Return the shared ConversationSummarizer instance (None if not yet initialized)."""
+    return _summarizer
+
+
+def init_summarizer() -> ConversationSummarizer:
+    """Instantiate ConversationSummarizer with the configured LLM and store globally."""
+    global _summarizer
+    from core.memory.summarizer import ConversationSummarizer
+    from core.llm.provider import get_llm
+
+    try:
+        llm = get_llm(streaming=False)
+        _summarizer = ConversationSummarizer(llm=llm)
+        logger.info("ConversationSummarizer initialized.")
+    except Exception as e:
+        logger.warning(f"ConversationSummarizer init failed (non-fatal): {e}")
+        _summarizer = ConversationSummarizer(llm=None)
+    return _summarizer
 
 
 def is_port_in_use(port: int) -> bool:
@@ -76,7 +106,6 @@ async def run_startup_checks(config: Settings) -> None:
             "plugins",
             "mcp",
             "voices",
-            "config",
         ]
     )
     _create_default_workspace_config("personal")
@@ -90,34 +119,7 @@ async def run_startup_checks(config: Settings) -> None:
     if not os.path.exists("plugins/installed.json"):
         write_json("plugins/installed.json", {"plugins": {}})
 
-    # 4. Create default animations config
-    if not os.path.exists("config/animations.json"):
-        write_json(
-            "config/animations.json",
-            {
-                "animations": {
-                    "idle": {"file": None, "trigger_intents": []},
-                    "wave": {
-                        "file": None,
-                        "trigger_intents": ["greet", "hello", "wave"],
-                    },
-                    "nod": {
-                        "file": None,
-                        "trigger_intents": ["agree", "yes", "confirm"],
-                    },
-                    "dance": {
-                        "file": None,
-                        "trigger_intents": ["dance", "celebrate", "party"],
-                    },
-                    "think": {
-                        "file": None,
-                        "trigger_intents": ["think", "consider", "hmm"],
-                    },
-                }
-            },
-        )
-
-    # 5. Check port availability
+    # 4. Check port availability
     for name, port in [("API", config.api_port), ("WebSocket", config.ws_port)]:
         if is_port_in_use(port):
             logger.error(

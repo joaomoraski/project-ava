@@ -1,6 +1,7 @@
 """Application config endpoints."""
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter
@@ -33,8 +34,6 @@ async def get_config() -> AppConfig:
         tts_language=settings.tts_language,
         default_mode=settings.default_mode,  # type: ignore[arg-type]
         default_workspace=settings.default_workspace,
-        meeting_hotkey=settings.meeting_hotkey,
-        toggle_avatar_hotkey=settings.toggle_avatar_hotkey,
         log_level=settings.log_level,
     )
 
@@ -42,16 +41,41 @@ async def get_config() -> AppConfig:
 @router.put("", response_model=OkResponse)
 async def update_config(payload: AppConfig) -> OkResponse:
     """
-    Update runtime configuration.
+    Update runtime configuration and persist to database.
     Note: Changes affecting LLM/STT/TTS require restart to take full effect.
-    For persistent changes, update .env directly.
     """
-    # Update in-memory settings (runtime only)
+    from core.db.engine import async_session
+    from core.db.models import AppState
+    from sqlalchemy import select
+
+    changed: dict[str, object] = {}
+
+    # Update in-memory settings
     for field, value in payload.model_dump(exclude_none=True).items():
         if hasattr(settings, field):
             try:
                 setattr(settings, field, value)
+                changed[field] = value
             except Exception:
                 pass  # Some fields are frozen
+
+    # Persist to database
+    if changed:
+        try:
+            async with async_session() as session:
+                for key, value in changed.items():
+                    result = await session.execute(
+                        select(AppState).where(AppState.key == key)
+                    )
+                    state = result.scalar_one_or_none()
+                    if state:
+                        state.value = json.dumps(value)
+                    else:
+                        session.add(AppState(key=key, value=json.dumps(value)))
+                await session.commit()
+            logger.info(f"Config persisted to database: {list(changed.keys())}")
+        except Exception as e:
+            logger.warning(f"Config updated in memory but persistence failed: {e}")
+
     logger.info("Config updated at runtime.")
     return OkResponse(message="Config updated. Restart required for STT/TTS/LLM changes.")

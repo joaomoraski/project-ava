@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from fastapi.responses import RedirectResponse
 
 from core.config import settings
+from core.db.engine import async_session
 
 logger = logging.getLogger("api.auth")
 
@@ -83,8 +84,9 @@ async def google_auth_callback(code: str | None = None, error: str | None = None
 
         creds = flow.credentials
         vault = SecretsVault()
-        vault.set_secret("GOOGLE_ACCESS_TOKEN", creds.token or "")
-        vault.set_secret("GOOGLE_REFRESH_TOKEN", creds.refresh_token or "")
+        async with async_session() as session:
+            await vault.set_secret(session, "GOOGLE_ACCESS_TOKEN", creds.token or "")
+            await vault.set_secret(session, "GOOGLE_REFRESH_TOKEN", creds.refresh_token or "")
 
         logger.info("Google OAuth tokens stored in vault.")
         return RedirectResponse(
@@ -103,8 +105,9 @@ async def google_auth_status() -> dict:
     try:
         from core.secrets.vault import SecretsVault
         vault = SecretsVault()
-        has_access = vault.get_preview("GOOGLE_ACCESS_TOKEN")["is_set"]
-        has_refresh = vault.get_preview("GOOGLE_REFRESH_TOKEN")["is_set"]
+        async with async_session() as session:
+            has_access = (await vault.get_preview(session, "GOOGLE_ACCESS_TOKEN"))["is_set"]
+            has_refresh = (await vault.get_preview(session, "GOOGLE_REFRESH_TOKEN"))["is_set"]
         return {
             "configured": bool(settings.google_client_id and settings.google_client_secret),
             "authenticated": has_access and has_refresh,

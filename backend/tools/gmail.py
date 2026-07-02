@@ -10,16 +10,19 @@ logger = logging.getLogger("tools.gmail")
 
 
 @tool
-def get_recent_emails(max_results: int = 5) -> str:
+async def get_recent_emails(max_results: int = 5) -> str:
     """Get recent unread emails from Gmail.
 
     Args:
         max_results: number of emails to fetch (default: 5)
     """
     try:
+        from core.db.engine import async_session
         from core.secrets.vault import SecretsVault
+
         vault = SecretsVault()
-        access_token = vault.get_secret("GOOGLE_ACCESS_TOKEN")
+        async with async_session() as session:
+            access_token = await vault.get_secret(session, "GOOGLE_ACCESS_TOKEN")
         if not access_token:
             return "Gmail not configured. Connect your Google account in the dashboard."
 
@@ -65,7 +68,7 @@ def get_recent_emails(max_results: int = 5) -> str:
 
 
 @tool
-def send_email(to: str, subject: str, body: str) -> str:
+async def send_email(to: str, subject: str, body: str) -> str:
     """Send an email via Gmail.
 
     Args:
@@ -74,9 +77,12 @@ def send_email(to: str, subject: str, body: str) -> str:
         body: plain text email body
     """
     try:
+        from core.db.engine import async_session
         from core.secrets.vault import SecretsVault
+
         vault = SecretsVault()
-        access_token = vault.get_secret("GOOGLE_ACCESS_TOKEN")
+        async with async_session() as session:
+            access_token = await vault.get_secret(session, "GOOGLE_ACCESS_TOKEN")
         if not access_token:
             return "Gmail not configured. Connect your Google account in the dashboard."
 

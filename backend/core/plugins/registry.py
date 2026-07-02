@@ -22,7 +22,17 @@ BUILTIN_TOOL_MAP: dict[str, tuple[str, str]] = {
     "get_recent_emails": ("tools.gmail", "get_recent_emails"),
     "send_email": ("tools.gmail", "send_email"),
     "search_chat_history": ("tools.chat_search", "search_chat_history"),
-    "trigger_animation": ("tools.animations", "trigger_animation"),
+    "knowledge_search": ("tools.knowledge_search", "knowledge_search"),
+    "search_meetings": ("tools.meetings", "search_meetings"),
+    "list_recent_meetings": ("tools.meetings", "list_recent_meetings"),
+    "get_action_items": ("tools.meetings", "get_action_items"),
+    "meeting_prep": ("tools.meetings", "meeting_prep"),
+    "manage_plugin": ("tools.self_api", "manage_plugin"),
+    "update_settings": ("tools.self_api", "update_settings"),
+    "manage_workspace": ("tools.self_api", "manage_workspace"),
+    "manage_todos": ("tools.todos", "manage_todos"),
+    "manage_alerts": ("tools.alerts", "manage_alerts"),
+    "get_context": ("tools.contexts", "get_context"),
 }
 
 # Logical groupings for convenience in workspace config
@@ -32,7 +42,12 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "google_calendar": ["get_calendar_events", "create_calendar_event"],
     "gmail": ["get_recent_emails", "send_email"],
     "chat_search": ["search_chat_history"],
-    "animations": ["trigger_animation"],
+    "knowledge_search": ["knowledge_search"],
+    "meetings": ["search_meetings", "list_recent_meetings", "get_action_items", "meeting_prep"],
+    "self_service": ["manage_plugin", "update_settings", "manage_workspace"],
+    "todos": ["manage_todos"],
+    "alerts": ["manage_alerts"],
+    "contexts": ["get_context"],
 }
 
 

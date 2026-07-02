@@ -164,3 +164,122 @@ def ingest_directory(directory: str) -> list[dict]:
         if chunks:
             logger.info(f"Ingested: {file_path} → {len(chunks)} chunks")
     return all_chunks
+
+
+def chunk_meeting_document(
+    markdown: str,
+    max_chars: int = 900,
+    overlap_pct: float = 0.15,
+    source: str = "",
+    title: str = "",
+) -> list[dict]:
+    """Section-aware chunking for meeting Markdown documents.
+
+    Respects section boundaries:
+    - Never splits within a section header's content unless forced.
+    - Prefers breaking at paragraph boundaries.
+    - Falls back to sentence-level splits for very long paragraphs.
+
+    Returns list of dicts with 'content', 'source', 'source_type', 'file_name'.
+    """
+    if not markdown.strip():
+        return []
+
+    # Split into top-level and second-level sections, preserving header lines.
+    import re
+    # Split on lines that start with # or ##, keeping the delimiter.
+    raw_sections: list[str] = re.split(r"(?m)(?=^#{1,2} )", markdown)
+    raw_sections = [s.strip() for s in raw_sections if s.strip()]
+
+    def _split_sentences(text: str) -> list[str]:
+        """Naive sentence splitter on '. ', '! ', '? '."""
+        parts = re.split(r"(?<=[.!?])\s+", text)
+        return [p.strip() for p in parts if p.strip()]
+
+    def _hard_split(text: str, limit: int) -> list[str]:
+        """Last-resort split: chunk at word boundary when no sentence punctuation exists."""
+        if len(text) <= limit:
+            return [text]
+        words = text.split(" ")
+        out: list[str] = []
+        buf = ""
+        for w in words:
+            if buf and len(buf) + 1 + len(w) > limit:
+                out.append(buf)
+                buf = w
+            else:
+                buf = (buf + " " + w).strip() if buf else w
+        if buf:
+            out.append(buf)
+        return out
+
+    def _build_chunks(text: str) -> list[str]:
+        """Split a section into chunks ≤ max_chars, preferring paragraph boundaries."""
+        if len(text) <= max_chars:
+            return [text]
+
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        result: list[str] = []
+        current = ""
+
+        for para in paragraphs:
+            if len(para) > max_chars:
+                # Para too big — split at sentence boundaries
+                if current:
+                    result.append(current)
+                    current = ""
+                sentences = _split_sentences(para)
+                buf = ""
+                for sent in sentences:
+                    # If a single "sentence" exceeds max_chars (no punctuation),
+                    # hard-split it at word boundaries.
+                    if len(sent) > max_chars:
+                        if buf:
+                            result.append(buf)
+                            buf = ""
+                        result.extend(_hard_split(sent, max_chars))
+                        continue
+                    if buf and len(buf) + 1 + len(sent) > max_chars:
+                        result.append(buf)
+                        buf = sent
+                    else:
+                        buf = (buf + " " + sent).strip() if buf else sent
+                if buf:
+                    result.append(buf)
+            elif current and len(current) + 2 + len(para) > max_chars:
+                result.append(current)
+                current = para
+            else:
+                current = (current + "\n\n" + para).strip() if current else para
+
+        if current:
+            result.append(current)
+
+        return result if result else [text[:max_chars]]
+
+    # Collect all raw text chunks from sections
+    raw_chunks: list[str] = []
+    for section in raw_sections:
+        raw_chunks.extend(_build_chunks(section))
+
+    if not raw_chunks:
+        return []
+
+    # Apply overlap: prepend tail of previous chunk
+    overlap_chars = max(0, int(max_chars * overlap_pct))
+    final_chunks: list[dict] = []
+    for i, chunk in enumerate(raw_chunks):
+        if i > 0 and overlap_chars > 0:
+            prev = raw_chunks[i - 1]
+            tail = prev[-overlap_chars:].strip()
+            # Only prepend if it doesn't duplicate the start of current chunk
+            if tail and not chunk.startswith(tail):
+                chunk = tail + "\n\n" + chunk
+        final_chunks.append({
+            "content": chunk,
+            "source": source,
+            "source_type": "meeting",
+            "file_name": title,
+        })
+
+    return final_chunks

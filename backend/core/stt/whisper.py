@@ -17,8 +17,10 @@ logger = logging.getLogger("core.stt.whisper")
 
 class TranscriptionResult(NamedTuple):
     text: str
-    language: str
-    confidence: float  # average segment no_speech_prob inverted
+    language: str = ""
+    confidence: float = 0.0   # 1 - mean(no_speech_prob) across segments
+    no_speech_prob: float = 0.0  # mean no_speech_prob (higher = more likely silence)
+    avg_logprob: float = 0.0     # min avg_logprob across segments (worst-case confidence)
 
 
 class WhisperSTT:
@@ -55,6 +57,8 @@ class WhisperSTT:
                 logger.warning("CUDA not available, falling back to CPU for Whisper.")
                 device = "cpu"
         except ImportError:
+            if device == "cuda":
+                logger.warning("torch not installed, falling back to CPU for Whisper.")
             device = "cpu"
 
         compute_type = "int8" if device == "cpu" else (
@@ -62,12 +66,25 @@ class WhisperSTT:
         )
 
         logger.info(f"Loading Whisper {self._model_size} on {device} ({compute_type})...")
-        self._model = WhisperModel(
-            self._model_size,
-            device=device,
-            compute_type=compute_type,
-        )
-        logger.info("Whisper STT loaded.")
+        try:
+            self._model = WhisperModel(
+                self._model_size,
+                device=device,
+                compute_type=compute_type,
+            )
+        except Exception as e:
+            if device != "cpu":
+                logger.warning(f"Failed to load Whisper on {device}: {e}. Retrying with CPU...")
+                device = "cpu"
+                compute_type = "int8"
+                self._model = WhisperModel(
+                    self._model_size,
+                    device="cpu",
+                    compute_type="int8",
+                )
+            else:
+                raise
+        logger.info(f"Whisper STT loaded on {device}.")
 
     def transcribe(
         self,
@@ -88,31 +105,55 @@ class WhisperSTT:
         if self._model is None:
             raise RuntimeError("Whisper model not loaded. Call load() first.")
 
-        segments, info = self._model.transcribe(
-            audio,
-            language=language,
-            initial_prompt=initial_prompt,
-            vad_filter=False,  # VAD already done upstream
-            word_timestamps=False,
-            beam_size=5,
-        )
+        try:
+            segments, info = self._model.transcribe(
+                audio,
+                language=language,
+                initial_prompt=initial_prompt,
+                vad_filter=False,  # VAD already done upstream
+                word_timestamps=False,
+                beam_size=5,
+            )
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "cuda" in err_msg or "cublas" in err_msg or "gpu" in err_msg:
+                logger.warning(f"CUDA error during transcription: {e}. Reloading model on CPU...")
+                from faster_whisper import WhisperModel
+                self._model = WhisperModel(self._model_size, device="cpu", compute_type="int8")
+                segments, info = self._model.transcribe(
+                    audio,
+                    language=language,
+                    initial_prompt=initial_prompt,
+                    vad_filter=False,
+                    word_timestamps=False,
+                    beam_size=5,
+                )
+            else:
+                raise
 
         text_parts: list[str] = []
         no_speech_probs: list[float] = []
+        avg_logprobs: list[float] = []
 
         for segment in segments:
             text_parts.append(segment.text.strip())
             if hasattr(segment, "no_speech_prob"):
                 no_speech_probs.append(segment.no_speech_prob)
+            if hasattr(segment, "avg_logprob"):
+                avg_logprobs.append(segment.avg_logprob)
 
         text = " ".join(text_parts).strip()
-        avg_no_speech = sum(no_speech_probs) / len(no_speech_probs) if no_speech_probs else 0.5
-        confidence = 1.0 - avg_no_speech
+        mean_no_speech = sum(no_speech_probs) / len(no_speech_probs) if no_speech_probs else 0.5
+        confidence = 1.0 - mean_no_speech
+        # worst-case (min) logprob across segments; 0.0 default = neutral (no segments)
+        min_logprob = min(avg_logprobs) if avg_logprobs else 0.0
 
         return TranscriptionResult(
             text=text,
             language=info.language,
             confidence=confidence,
+            no_speech_prob=mean_no_speech,
+            avg_logprob=min_logprob,
         )
 
     @property

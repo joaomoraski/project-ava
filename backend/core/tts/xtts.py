@@ -34,18 +34,28 @@ class XTTSS:
 
     def load(self) -> None:
         """Load XTTS model into memory."""
+        import os
+        # Auto-accept CPML license (non-commercial) to avoid interactive prompt
+        os.environ["COQUI_TOS_AGREED"] = "1"
+
         try:
             from TTS.api import TTS
         except ImportError:
             logger.error("coqui-tts not installed. Run: pip install coqui-tts")
             raise
 
-        logger.info("Loading XTTS v2 (this may take a moment)...")
+        logger.info("Loading XTTS v2 (this may take a moment — first run downloads ~1.8GB)...")
         self._tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
         logger.info("XTTS v2 loaded.")
 
-    def synthesize(self, text: str) -> np.ndarray | None:
-        """Synthesize text using voice cloning. Returns numpy float32 array."""
+    def synthesize(self, text: str, language: str | None = None) -> np.ndarray | None:
+        """Synthesize text using voice cloning. Returns numpy float32 array.
+
+        Args:
+            text: Text to synthesize.
+            language: Optional language override (e.g. "pt", "en"). If None,
+                      falls back to instance config / auto-detect heuristic.
+        """
         if self._tts is None:
             raise RuntimeError("XTTS not loaded. Call load() first.")
 
@@ -58,20 +68,34 @@ class XTTSS:
             return None
 
         try:
+            lang = language if language is not None else self._language
+            if lang == "auto":
+                lang = self._detect_language(text)
+            lang_code = lang[:2] if len(lang) > 2 else lang
+
             wav = self._tts.tts(
                 text=text,
                 speaker_wav=self._voice_sample,
-                language=self._language[:2] if len(self._language) > 2 else self._language,
+                language=lang_code,
             )
             return np.array(wav, dtype=np.float32)
         except Exception as e:
             logger.error(f"XTTS synthesis failed: {e}")
             return None
 
-    async def asynthesize(self, text: str) -> np.ndarray | None:
+    @staticmethod
+    def _detect_language(text: str) -> str:
+        """Simple heuristic to detect pt vs en from text content."""
+        pt_markers = {"que", "não", "com", "para", "uma", "como", "isso", "está", "são", "você", "eu", "ele", "ela", "nós"}
+        words = set(text.lower().split())
+        pt_score = len(words & pt_markers)
+        return "pt" if pt_score >= 2 else "en"
+
+    async def asynthesize(self, text: str, language: str | None = None) -> np.ndarray | None:
         import asyncio
+        import functools
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.synthesize, text)
+        return await loop.run_in_executor(None, functools.partial(self.synthesize, text, language))
 
     @property
     def sample_rate(self) -> int:

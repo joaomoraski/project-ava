@@ -1,133 +1,124 @@
-"""Persistent chat history with cross-workspace access and full-text search.
+"""Persistent chat history — PostgreSQL backend.
 
-Storage:
-  - Messages: JSON files per session in workspaces/{name}/chat_history/{session_id}.json
-  - Index: SQLite metadata DB in workspaces/{name}/chat_history/sessions.db
-
-Messages are written immediately after each message (crash-safe).
-Sessions are never lost even if the backend crashes mid-response.
-
-ConversationSummaryBufferMemory pattern:
-  - Last N messages kept verbatim in context
-  - Older messages summarized by LLM (summary stored in session metadata)
+All messages are stored immediately on append (crash-safe via DB transactions).
+Full-text search uses PostgreSQL pg_trgm GIN index.
+Cross-workspace queries are single SQL statements.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-import sqlite3
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import date, datetime, timezone
 from typing import Any
 
-from core.memory.migrations import check_and_migrate
+from sqlalchemy import select, delete, func, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.db.models import ChatSession as ChatSessionModel, ChatMessage, Workspace
 
 logger = logging.getLogger("core.memory.chat_history")
 
-WORKSPACES_DIR = "workspaces"
-MAX_RECENT_MESSAGES = 20  # keep last N messages verbatim in LLM context
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+MAX_RECENT_MESSAGES = 20
 
 
 class ChatSession:
-    """A single conversation session.
-
-    Messages are persisted to disk immediately on append.
-    Session metadata is stored in the workspace SQLite index.
-    """
+    """A single conversation session backed by PostgreSQL."""
 
     def __init__(
         self,
         session_id: str,
         workspace: str,
         title: str | None = None,
+        mode: str = "chat",
+        session_date: date | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace = workspace
         self.title = title or f"Chat {session_id[:8]}"
-        self.created_at: str = _now_iso()
-        self.updated_at: str = _now_iso()
+        self.mode = mode
+        self.session_date = session_date
+        self.created_at: str = datetime.now(timezone.utc).isoformat()
+        self.updated_at: str = self.created_at
         self._messages: list[dict[str, Any]] = []
-        self._file_path = self._resolve_path()
 
-    def _resolve_path(self) -> Path:
-        path = Path(WORKSPACES_DIR) / self.workspace / "chat_history" / f"{self.session_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
+    async def append(self, session: AsyncSession, role: str, content: str) -> dict[str, Any]:
+        """Add a message — persisted immediately via DB insert."""
+        now = datetime.now(timezone.utc)
+        msg = ChatMessage(
+            id=uuid.uuid4(),
+            session_id=uuid.UUID(self.session_id),
+            role=role,
+            content=content,
+            created_at=now,
+        )
+        session.add(msg)
 
-    def append(self, role: str, content: str) -> dict[str, Any]:
-        """Add a message and persist immediately.
+        # Update session metadata
+        await session.execute(
+            update(ChatSessionModel)
+            .where(ChatSessionModel.id == uuid.UUID(self.session_id))
+            .values(
+                updated_at=now,
+                message_count=ChatSessionModel.message_count + 1,
+            )
+        )
+        await session.commit()
 
-        Args:
-            role: 'user' or 'assistant'
-            content: message text
-
-        Returns:
-            The message dict that was saved.
-        """
-        message = {
+        message_dict = {
             "role": role,
             "content": content,
-            "timestamp": _now_iso(),
+            "timestamp": now.isoformat(),
         }
-        self._messages.append(message)
-        self.updated_at = message["timestamp"]
-        self._save()
-        return message
-
-    def _save(self) -> None:
-        """Write full session to disk (atomic via temp file)."""
-        data = {
-            "session_id": self.session_id,
-            "workspace": self.workspace,
-            "title": self.title,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "messages": self._messages,
-        }
-        tmp_path = self._file_path.with_suffix(".tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            tmp_path.replace(self._file_path)  # atomic rename
-        except Exception as e:
-            logger.error(f"Failed to save session {self.session_id}: {e}")
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+        self._messages.append(message_dict)
+        self.updated_at = now.isoformat()
+        return message_dict
 
     @classmethod
-    def load(cls, session_id: str, workspace: str) -> "ChatSession | None":
-        """Load a session from disk. Returns None if not found."""
-        path = Path(WORKSPACES_DIR) / workspace / "chat_history" / f"{session_id}.json"
-        if not path.exists():
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            session = cls(
-                session_id=data["session_id"],
-                workspace=data["workspace"],
-                title=data.get("title"),
+    async def load(cls, session: AsyncSession, session_id: str, workspace: str) -> "ChatSession | None":
+        """Load a session with all messages from DB."""
+        result = await session.execute(
+            select(ChatSessionModel)
+            .join(Workspace)
+            .where(
+                ChatSessionModel.id == uuid.UUID(session_id),
+                Workspace.name == workspace,
             )
-            session.created_at = data["created_at"]
-            session.updated_at = data["updated_at"]
-            session._messages = data.get("messages", [])
-            return session
-        except Exception as e:
-            logger.error(f"Failed to load session {session_id}: {e}")
+        )
+        db_session = result.scalar_one_or_none()
+        if db_session is None:
             return None
+
+        cs = cls(
+            session_id=str(db_session.id),
+            workspace=workspace,
+            title=db_session.title,
+            mode=db_session.mode or "chat",
+            session_date=db_session.session_date,
+        )
+        cs.created_at = db_session.created_at.isoformat() if db_session.created_at else cs.created_at
+        cs.updated_at = db_session.updated_at.isoformat() if db_session.updated_at else cs.updated_at
+
+        # Load messages
+        msg_result = await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == db_session.id)
+            .order_by(ChatMessage.created_at)
+        )
+        cs._messages = [
+            {
+                "role": m.role,
+                "content": m.content,
+                "timestamp": m.created_at.isoformat() if m.created_at else "",
+            }
+            for m in msg_result.scalars().all()
+        ]
+        return cs
 
     @property
     def messages(self) -> list[dict[str, Any]]:
         return list(self._messages)
 
     def get_context_messages(self, max_recent: int = MAX_RECENT_MESSAGES) -> list[dict[str, Any]]:
-        """Return the last N messages for LLM context."""
         return self._messages[-max_recent:]
 
     def __len__(self) -> int:
@@ -135,120 +126,201 @@ class ChatSession:
 
 
 class ChatManager:
-    """Manages all chat sessions across workspaces.
-
-    Provides:
-    - Session creation and loading
-    - Cross-workspace listing and search
-    - SQLite-backed index for fast queries
-    """
+    """Manages chat sessions for a workspace — PostgreSQL backend."""
 
     def __init__(self, workspace: str = "personal") -> None:
         self._workspace = workspace
-        self._db_path = self._ensure_db()
 
-    def _ensure_db(self) -> str:
-        db_dir = Path(WORKSPACES_DIR) / self._workspace / "chat_history"
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = str(db_dir / "sessions.db")
-        check_and_migrate(db_path)
-        return db_path
+    async def _get_workspace_id(self, session: AsyncSession) -> uuid.UUID | None:
+        result = await session.execute(
+            select(Workspace.id).where(Workspace.name == self._workspace)
+        )
+        return result.scalar_one_or_none()
 
-    def create_session(self, title: str | None = None) -> ChatSession:
-        """Create a new chat session and persist it to disk immediately."""
-        session_id = str(uuid.uuid4())
-        session = ChatSession(session_id=session_id, workspace=self._workspace, title=title)
-        session._save()  # ensure file exists even before any messages
-        self._index_session(session)
-        return session
+    async def create_session(
+        self,
+        session: AsyncSession,
+        title: str | None = None,
+        mode: str = "chat",
+        session_date: date | None = None,
+    ) -> ChatSession:
+        """Create a new chat session."""
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
+            raise ValueError(f"Workspace '{self._workspace}' not found.")
 
-    def _index_session(self, session: ChatSession) -> None:
-        """Insert or update session metadata in SQLite index."""
+        session_id = uuid.uuid4()
+        cs_title = title or f"Chat {str(session_id)[:8]}"
+
+        db_session = ChatSessionModel(
+            id=session_id,
+            workspace_id=workspace_id,
+            title=cs_title,
+            message_count=0,
+            mode=mode,
+            session_date=session_date,
+        )
+        session.add(db_session)
+        await session.commit()
+        await session.refresh(db_session)
+
+        cs = ChatSession(
+            session_id=str(session_id),
+            workspace=self._workspace,
+            title=cs_title,
+            mode=mode,
+            session_date=session_date,
+        )
+        cs.created_at = db_session.created_at.isoformat() if db_session.created_at else cs.created_at
+        cs.updated_at = cs.created_at
+        return cs
+
+    async def get_or_create_daily_companion_session(
+        self,
+        session: AsyncSession,
+        day: date | None = None,
+    ) -> ChatSession:
+        """Return today's companion session for this workspace, creating if missing."""
+        day = day or date.today()
+
+        workspace_id = await self._get_workspace_id(session)
+        if workspace_id is None:
+            raise ValueError(f"Workspace '{self._workspace}' not found.")
+
+        result = await session.execute(
+            select(ChatSessionModel).where(
+                ChatSessionModel.workspace_id == workspace_id,
+                ChatSessionModel.mode == "companion",
+                ChatSessionModel.session_date == day,
+            )
+        )
+        db_session = result.scalar_one_or_none()
+
+        if db_session is not None:
+            cs = ChatSession(
+                session_id=str(db_session.id),
+                workspace=self._workspace,
+                title=db_session.title,
+                mode="companion",
+                session_date=db_session.session_date,
+            )
+            cs.created_at = db_session.created_at.isoformat() if db_session.created_at else cs.created_at
+            cs.updated_at = db_session.updated_at.isoformat() if db_session.updated_at else cs.updated_at
+            return cs
+
+        return await self.create_session(
+            session,
+            title=f"Companion — {day.isoformat()}",
+            mode="companion",
+            session_date=day,
+        )
+
+    async def finalize_companion_session(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        llm: Any | None = None,
+    ) -> None:
+        """Set updated_at=now, optionally regenerate title via LLM from first 10 messages."""
+        now = datetime.now(timezone.utc)
+
+        cs = await ChatSession.load(session, session_id, self._workspace)
+        if cs is None:
+            logger.warning("finalize_companion_session: session %s not found", session_id)
+            return
+
+        new_title: str | None = None
+        if llm is not None and len(cs) >= 6:
+            first_ten = cs.messages[:10]
+            transcript = "\n".join(f"{m['role']}: {m['content']}" for m in first_ten)
+            prompt = (
+                "Summarize this companion conversation in 4-6 words for a title:\n"
+                f"{transcript}"
+            )
+            try:
+                response = await llm.ainvoke(prompt)
+                raw = response.content if hasattr(response, "content") else str(response)
+                candidate = raw.strip().strip('"').strip("'")
+                if candidate:
+                    new_title = candidate
+            except Exception as exc:
+                logger.warning("finalize_companion_session: LLM title generation failed: %s", exc)
+
+        values: dict[str, Any] = {"updated_at": now}
+        if new_title:
+            values["title"] = new_title
+
+        await session.execute(
+            update(ChatSessionModel)
+            .where(ChatSessionModel.id == uuid.UUID(session_id))
+            .values(**values)
+        )
+        await session.commit()
+
+        if new_title:
+            cs.title = new_title
+        cs.updated_at = now.isoformat()
+
+    async def get_session(self, session: AsyncSession, session_id: str) -> ChatSession | None:
+        return await ChatSession.load(session, session_id, self._workspace)
+
+    async def list_sessions(self, session: AsyncSession, limit: int = 50) -> list[dict[str, Any]]:
+        result = await session.execute(
+            select(ChatSessionModel)
+            .join(Workspace)
+            .where(Workspace.name == self._workspace)
+            .order_by(ChatSessionModel.updated_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "session_id": str(s.id),
+                "workspace": self._workspace,
+                "title": s.title,
+                "created_at": s.created_at.isoformat() if s.created_at else "",
+                "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+                "message_count": s.message_count or 0,
+            }
+            for s in result.scalars().all()
+        ]
+
+    async def search(self, session: AsyncSession, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Full-text search using pg_trgm index."""
+        result = await session.execute(
+            select(
+                ChatMessage.content,
+                ChatMessage.role,
+                ChatMessage.created_at,
+                ChatSessionModel.id.label("session_id"),
+                ChatSessionModel.title.label("session_title"),
+            )
+            .join(ChatSessionModel, ChatMessage.session_id == ChatSessionModel.id)
+            .join(Workspace, ChatSessionModel.workspace_id == Workspace.id)
+            .where(
+                Workspace.name == self._workspace,
+                ChatMessage.content.ilike(f"%{query}%"),
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "session_id": str(row.session_id),
+                "session_title": row.session_title,
+                "workspace": self._workspace,
+                "role": row.role,
+                "content": row.content,
+                "timestamp": row.created_at.isoformat() if row.created_at else "",
+            }
+            for row in result.all()
+        ]
+
+    async def delete_session(self, session: AsyncSession, session_id: str) -> bool:
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO sessions
-                        (session_id, workspace, title, created_at, updated_at, message_count)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session.session_id,
-                        session.workspace,
-                        session.title,
-                        session.created_at,
-                        session.updated_at,
-                        len(session),
-                    ),
-                )
-        except Exception as e:
-            logger.error(f"Failed to index session {session.session_id}: {e}")
-
-    def update_session_index(self, session: ChatSession) -> None:
-        """Update session metadata after messages are added."""
-        self._index_session(session)
-
-    def get_session(self, session_id: str) -> ChatSession | None:
-        """Load a session from disk."""
-        return ChatSession.load(session_id, self._workspace)
-
-    def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
-        """List recent sessions for this workspace, newest first."""
-        try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    """
-                    SELECT session_id, workspace, title, created_at, updated_at, message_count
-                    FROM sessions
-                    WHERE workspace = ?
-                    ORDER BY updated_at DESC
-                    LIMIT ?
-                    """,
-                    (self._workspace, limit),
-                ).fetchall()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"list_sessions failed: {e}")
-            return []
-
-    def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Full-text search across all session messages in this workspace.
-
-        Loads session files and scans message content.
-        Returns matching messages with session context.
-        """
-        results = []
-        query_lower = query.lower()
-
-        sessions = self.list_sessions(limit=200)
-        for session_meta in sessions:
-            session = ChatSession.load(session_meta["session_id"], self._workspace)
-            if not session:
-                continue
-            for msg in session.messages:
-                if query_lower in msg.get("content", "").lower():
-                    results.append({
-                        "session_id": session.session_id,
-                        "session_title": session.title,
-                        "workspace": session.workspace,
-                        "role": msg["role"],
-                        "content": msg["content"],
-                        "timestamp": msg["timestamp"],
-                    })
-                    if len(results) >= limit:
-                        return results
-
-        return results
-
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session from disk and index."""
-        path = Path(WORKSPACES_DIR) / self._workspace / "chat_history" / f"{session_id}.json"
-        try:
-            if path.exists():
-                path.unlink()
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            await session.execute(
+                delete(ChatSessionModel).where(ChatSessionModel.id == uuid.UUID(session_id))
+            )
+            await session.commit()
             return True
         except Exception as e:
             logger.error(f"delete_session {session_id} failed: {e}")
@@ -256,41 +328,65 @@ class ChatManager:
 
 
 class CrossWorkspaceChatManager:
-    """Read-only cross-workspace chat access.
-
-    Allows searching and listing sessions across all workspaces.
-    """
+    """Cross-workspace chat access — single queries, no iteration."""
 
     @staticmethod
-    def list_all_workspaces() -> list[str]:
-        """Return all workspace names that have chat history."""
-        base = Path(WORKSPACES_DIR)
-        if not base.exists():
-            return []
+    async def list_all_sessions(session: AsyncSession, limit: int = 50) -> list[dict[str, Any]]:
+        result = await session.execute(
+            select(
+                ChatSessionModel.id,
+                ChatSessionModel.title,
+                ChatSessionModel.created_at,
+                ChatSessionModel.updated_at,
+                ChatSessionModel.message_count,
+                Workspace.name.label("workspace"),
+            )
+            .join(Workspace, ChatSessionModel.workspace_id == Workspace.id)
+            .order_by(ChatSessionModel.updated_at.desc())
+            .limit(limit)
+        )
         return [
-            d.name for d in base.iterdir()
-            if d.is_dir() and (d / "chat_history").exists()
+            {
+                "session_id": str(row.id),
+                "workspace": row.workspace,
+                "title": row.title,
+                "created_at": row.created_at.isoformat() if row.created_at else "",
+                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+                "message_count": row.message_count or 0,
+            }
+            for row in result.all()
         ]
 
-    @classmethod
-    def search_all(cls, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Search across all workspaces."""
-        results = []
-        for workspace in cls.list_all_workspaces():
-            manager = ChatManager(workspace)
-            workspace_results = manager.search(query, limit=limit - len(results))
-            results.extend(workspace_results)
-            if len(results) >= limit:
-                break
-        return results
+    @staticmethod
+    async def search_all(session: AsyncSession, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        result = await session.execute(
+            select(
+                ChatMessage.content,
+                ChatMessage.role,
+                ChatMessage.created_at,
+                ChatSessionModel.id.label("session_id"),
+                ChatSessionModel.title.label("session_title"),
+                Workspace.name.label("workspace"),
+            )
+            .join(ChatSessionModel, ChatMessage.session_id == ChatSessionModel.id)
+            .join(Workspace, ChatSessionModel.workspace_id == Workspace.id)
+            .where(ChatMessage.content.ilike(f"%{query}%"))
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "session_id": str(row.session_id),
+                "session_title": row.session_title,
+                "workspace": row.workspace,
+                "role": row.role,
+                "content": row.content,
+                "timestamp": row.created_at.isoformat() if row.created_at else "",
+            }
+            for row in result.all()
+        ]
 
-    @classmethod
-    def list_all_sessions(cls, limit: int = 50) -> list[dict[str, Any]]:
-        """List sessions from all workspaces, sorted by updated_at."""
-        all_sessions = []
-        for workspace in cls.list_all_workspaces():
-            manager = ChatManager(workspace)
-            all_sessions.extend(manager.list_sessions(limit=limit))
-
-        all_sessions.sort(key=lambda s: s["updated_at"], reverse=True)
-        return all_sessions[:limit]
+    @staticmethod
+    async def list_all_workspaces(session: AsyncSession) -> list[str]:
+        result = await session.execute(select(Workspace.name).order_by(Workspace.name))
+        return [row[0] for row in result.all()]

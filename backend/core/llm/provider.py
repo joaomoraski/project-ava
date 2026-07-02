@@ -69,7 +69,22 @@ def get_llm(streaming: bool = True):
             streaming=streaming,
         )
 
-    raise ValueError(f"Unknown LLM_PROVIDER: {provider}. Valid: ollama, openai, anthropic")
+    if provider == "google":
+        if not settings.google_api_key:
+            raise ValueError("LLM_PROVIDER=google but GOOGLE_API_KEY is not set.")
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+        except ImportError:
+            raise ImportError("langchain-google-genai not installed. Run: pip install langchain-google-genai")
+
+        logger.debug(f"Using Google: {settings.google_model}")
+        return ChatGoogleGenerativeAI(
+            model=settings.google_model,
+            google_api_key=settings.google_api_key,
+            streaming=streaming,
+        )
+
+    raise ValueError(f"Unknown LLM_PROVIDER: {provider}. Valid: ollama, openai, anthropic, google")
 
 
 async def stream_tokens(

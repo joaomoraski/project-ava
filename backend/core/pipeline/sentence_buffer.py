@@ -11,9 +11,15 @@ Flush triggers:
 from __future__ import annotations
 
 import re
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Iterator, NamedTuple
 
 SENTENCE_END = re.compile(r'[.!?\n]')
+
+
+class SentenceChunk(NamedTuple):
+    """A sentence ready for TTS synthesis, with its detected language."""
+    text: str
+    language: str | None
 SOFT_DELIMITER = re.compile(r'[,;:]')
 SOFT_FLUSH_MIN_CHARS = 60
 FORCE_FLUSH_CHARS = 200
@@ -90,20 +96,26 @@ class SentenceBuffer:
 
 async def stream_sentences(
     token_stream: AsyncIterator[str],
+    language: str | None = None,
     soft_flush_min: int = SOFT_FLUSH_MIN_CHARS,
     force_flush_at: int = FORCE_FLUSH_CHARS,
-) -> AsyncIterator[str]:
-    """Async generator: converts token stream → sentence stream for TTS.
+) -> AsyncIterator[SentenceChunk]:
+    """Async generator: converts token stream → SentenceChunk stream for TTS.
+
+    Args:
+        token_stream: Async generator of LLM tokens.
+        language: Language code detected by STT (e.g. "pt", "en"). If None,
+                  TTS will auto-detect per sentence.
 
     Usage:
-        async for sentence in stream_sentences(llm_stream):
-            await tts.synthesize(sentence)
+        async for chunk in stream_sentences(llm_stream, language="pt"):
+            await tts.asynthesize(chunk.text, language=chunk.language)
     """
     buf = SentenceBuffer(soft_flush_min, force_flush_at)
     async for token in token_stream:
         for sentence in buf.feed(token):
-            yield sentence
+            yield SentenceChunk(text=sentence, language=language)
     # Flush remaining
     remaining = buf.flush_remaining()
     if remaining:
-        yield remaining
+        yield SentenceChunk(text=remaining, language=language)

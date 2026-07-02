@@ -238,12 +238,14 @@ class MeetingRecorder:
 
         logger.info(f"Meeting saved: {file_path}")
 
-        # Index into knowledge base
+        # Index into knowledge base — chunk transcript only (not LLM meta-commentary)
         try:
             from core.knowledge.rag import KnowledgeBase
             from core.knowledge.ingestion import chunk_text
             kb = KnowledgeBase(workspace, "meetings")
-            chunks = chunk_text(content)
+            # Chunk the raw transcript, not the full content (which includes LLM summary)
+            transcript_header = f"# {title}\n\nDate: {date_str}\nWorkspace: {workspace}\n\n"
+            chunks = chunk_text(transcript_header + transcript)
             kb.add_chunks([
                 {"content": c, "source": file_path, "source_type": "meeting", "file_name": filename}
                 for c in chunks
@@ -261,11 +263,14 @@ class MeetingRecorder:
 
             llm = get_llm(streaming=False)
             prompt = (
-                "Summarize this meeting transcript. Include:\n"
-                "1. Key decisions made\n"
-                "2. Action items (with owner if mentioned)\n"
-                "3. Main topics discussed\n\n"
-                f"Transcript:\n{transcript[:3000]}"  # limit context
+                "Summarize this meeting transcript concisely. Output ONLY the summary content — "
+                "no preamble, no meta-commentary, no 'Here is...' prefix.\n\n"
+                "Format:\n"
+                "### Key Decisions\n- decision 1\n- decision 2\n\n"
+                "### Action Items\n- [ ] action (owner)\n\n"
+                "### Topics Discussed\n- topic 1\n- topic 2\n\n"
+                "### Summary\nBrief paragraph.\n\n"
+                f"Transcript:\n{transcript[:3000]}"
             )
 
             result = await llm.ainvoke([HumanMessage(content=prompt)])
