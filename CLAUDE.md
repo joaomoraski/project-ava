@@ -1,6 +1,6 @@
 # Ava Project — Claude Code Context
 
-Full-stack local AI assistant. Backend in Python/FastAPI (this repo). Frontend in Next.js (Cursor + Gemini). Electron avatar optional.
+Full-stack local AI assistant. Backend in Python/FastAPI (this repo). Frontend in Next.js (Cursor + Gemini).
 
 ## Ports
 
@@ -12,10 +12,9 @@ Full-stack local AI assistant. Backend in Python/FastAPI (this repo). Frontend i
 
 ## Architecture
 
-**Three independent components — avatar is entirely optional:**
-- Backend plays TTS via system speakers (sounddevice). Avatar adds visuals only.
+**Independent components:**
+- Backend plays TTS via system speakers (sounddevice).
 - If no WebSocket client is connected, the backend skips all WS sends silently.
-- `ws_manager.has_avatar_client()` guards all avatar-only events.
 
 **Working directory:** Always `backend/` when running Python commands.
 
@@ -46,7 +45,6 @@ backend/
 │   ├── workspace.py     # validate_name(), create/load/save/list workspace
 │   ├── tray.py          # SystemTray (pystray) + HotkeyManager (keyboard)
 │   ├── autonomous.py    # AutonomousAgent: proactive loop, TTS + OS notify
-│   ├── animations.py    # AnimationRegistry + AnimationDispatcher
 │   ├── audio/
 │   │   ├── vad.py       # SileroVAD: speech start/end callbacks
 │   │   └── capture.py   # MicrophoneCapture + LoopbackCapture (cross-platform)
@@ -86,8 +84,7 @@ backend/
 │   ├── system_control.py      # get_system_info, open_application, take_screenshot
 │   ├── google_calendar.py     # get/create calendar events (requires Google OAuth)
 │   ├── gmail.py               # get_recent_emails, send_email
-│   ├── chat_search.py         # search_chat_history (uses ChatManager)
-│   └── animations.py          # trigger_animation LangChain tool
+│   └── chat_search.py         # search_chat_history (uses ChatManager)
 ├── workspaces/
 │   └── personal/
 │       ├── config.json        # workspace config (system_prompt, tools, plugins, etc.)
@@ -99,8 +96,6 @@ backend/
 ├── secrets/
 │   ├── master.key             # AES key (0600 perms, gitignored)
 │   └── vault.enc              # encrypted secrets (gitignored)
-├── config/
-│   └── animations.json        # animation registry (triggers, files)
 └── tests/
     ├── conftest.py            # pytest fixtures: test_workspace, client
     ├── test_api_health.py     # 8 API smoke tests
@@ -116,11 +111,11 @@ backend/
 ### Secrets — never in .env
 Plugin/MCP secrets go through `/api/secrets/set` → encrypted vault. The API only returns `{name, is_set, preview: "tdst_****7f2a"}`. `vault.get_env_for_mcp()` resolves `${SECRET_NAME}` refs at subprocess start time.
 
-### Avatar is optional
-All avatar-specific events (`audio_chunk`, `lipsync`, `animation`, `show`, `hide`) are guarded by `ws_manager.has_avatar_client()`. If no avatar is connected, they are silently skipped. Voice pipeline plays locally via `LocalAudioPlayer` (sounddevice) unconditionally.
+### Local audio output
+The voice pipeline plays locally via `LocalAudioPlayer` (sounddevice) unconditionally. If no WebSocket client is connected, WS sends are silently skipped.
 
 ### Barge-in
-`PipelineController.handle_barge_in()`: cancels the LLM asyncio task, calls `local_player.stop()`, flushes TTS queue, sends `tts_stop` to avatar if connected.
+`PipelineController.handle_barge_in()`: cancels the LLM asyncio task, calls `local_player.stop()`, flushes TTS queue, and broadcasts `tts_stop`.
 
 ### Mode transitions
 `StateMachine.transition()` is protected by `asyncio.Lock`. It applies pipeline effects (start/stop VAD, capture, TTS) and broadcasts `mode_change` to all WebSocket clients.
@@ -187,7 +182,7 @@ REST (port 8471):
   GET  /auth/google/status
   GET  /auth/google/callback     OAuth redirect handler
 
-WebSocket (port 8472): ws://localhost:8472/ws?client_type=dashboard|avatar
+WebSocket (port 8472): ws://localhost:8472/ws?client_type=dashboard
   ← status          {type, status: "listening"|"thinking"|"speaking"}
   ← mode_change     {type, mode, workspace}
   ← text_delta      {type, delta}
@@ -195,10 +190,6 @@ WebSocket (port 8472): ws://localhost:8472/ws?client_type=dashboard|avatar
   ← tts_stop        {type}
   ← error           {type, service, message}
   ← plugin_event    {type, plugin, event}
-  ← audio_chunk     {type, data, sample_rate}  — AVATAR ONLY
-  ← lipsync         {type, visemes}             — AVATAR ONLY
-  ← animation       {type, name}               — AVATAR ONLY
-  ← show / hide     {type}                     — AVATAR ONLY
 ```
 
 ## Running Tests
@@ -210,6 +201,8 @@ pytest tests/ -v          # all 77 tests
 pytest tests/test_stt_gate.py -v
 pytest tests/test_sentence_buffer.py -v
 ```
+
+**IMPORTANT — run tests safely.** `conftest.py` calls `drop_all()` at the start and end of every session. Always use `make test` (which sets `TEST_DATABASE_URL=ava_test` automatically) or export the variable explicitly before running `pytest` directly. Running bare `pytest` without `TEST_DATABASE_URL` set now defaults to `ava_test` (safe), but `make test` is still preferred. Never point `TEST_DATABASE_URL` at `ava` or any DB name that does not end with `_test` — conftest will abort with an error before any schema changes occur.
 
 ## Frontend Coordination
 
@@ -228,6 +221,6 @@ cd backend && python dump_openapi.py > ../openapi.json
 - Python 3.11+, type hints everywhere, `from __future__ import annotations`
 - Async functions for all I/O (FastAPI routes, pipeline, WS)
 - Graceful degradation: if a library isn't installed, log a clear error and return a safe fallback — never crash the whole backend
-- Global singletons (`pipeline_controller`, `state_machine`, `mcp_manager`, `plugin_registry`, `animation_dispatcher`) initialized at module level, components injected after startup to avoid circular imports
+- Global singletons (`pipeline_controller`, `state_machine`, `mcp_manager`, `plugin_registry`) initialized at module level, components injected after startup to avoid circular imports
 - Secrets: never log, never return full values from API, never store in .env
 - Tests: use `tmp_path` + `monkeypatch.chdir()` for isolation, never touch the real workspace
