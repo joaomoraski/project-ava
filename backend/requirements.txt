@@ -1,0 +1,82 @@
+# === Web Framework ===
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=13.1
+starlette>=0.41.2
+
+# === Config & Validation ===
+pydantic>=2.9.2
+pydantic-settings>=2.5.2
+python-dotenv>=1.0.1
+
+# === HTTP & Auth ===
+httpx>=0.27.2
+slowapi>=0.1.9
+python-multipart>=0.0.20
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
+
+# === Security ===
+cryptography>=43.0.3
+
+# === Database ===
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+alembic>=1.14.0
+pgvector>=0.3.6
+procrastinate>=3.0
+psycopg[binary]>=3.2
+
+# === AI / LLM ===
+langchain>=0.3.7
+langchain-ollama>=0.2.1
+langchain-openai>=0.2.7
+langchain-anthropic>=0.2.4
+langchain-google-genai>=2.0.0
+langgraph>=0.2.38
+langchain-community>=0.3.7
+tiktoken>=0.7.0
+
+# === Voice Pipeline ===
+# pipecat-ai not needed — Silero VAD loads directly from torch hub
+faster-whisper>=1.1.0
+sounddevice>=0.5.0
+soundfile>=0.12.1   # WAV read/write for MeetingRecorder + audio I/O
+numpy>=1.26.4
+scipy>=1.14.1
+torch>=2.6.0
+torchaudio>=2.6.0
+# CUDA runtime for Whisper GPU inference — Linux x86_64 only (skipped on macOS/Windows;
+# CPU fallback works everywhere via WHISPER_DEVICE=cpu).
+nvidia-cublas-cu12; platform_system == "Linux" and platform_machine == "x86_64"
+nvidia-cudnn-cu12; platform_system == "Linux" and platform_machine == "x86_64"
+
+# === TTS ===
+kokoro-onnx>=0.5.0  # kokoro: fast CPU TTS, 54 voices, Python 3.13 compatible
+coqui-tts>=0.27.0   # xtts: voice cloning from WAV sample (multilingual)
+transformers>=4.57,<5.0  # pinned: coqui-tts needs >=4.57, >=5.0 breaks import
+
+# === Knowledge Base ===
+pymupdf>=1.24.13
+python-docx>=1.1.2
+trafilatura>=1.12.1
+markdownify>=0.13.1
+sentence-transformers>=3.3.0
+
+# === Tools ===
+google-api-python-client>=2.151.0
+pyautogui>=0.9.54
+psutil>=6.1.0
+duckduckgo-search>=6.3.7
+tavily-python>=0.5.0
+watchdog>=6.0.0
+pystray>=0.19.5
+Pillow>=11.0.0
+
+# === Meeting Mode ===
+pyannote-audio>=3.3.2
+
+# === Dev ===
+pytest>=8.3.3
+pytest-asyncio>=0.24.0
+ruff>=0.6.0   # linter — used by `make lint`

@@ -492,7 +492,7 @@ pyrightconfig.json
 node_modules
 
 *.sublime*
-
+.claude/
 psd
 thumb
 sketch
@@ -518,5 +518,20 @@ sketch
 
 
 ## Custom ##
-ava-project-plan.md  
+# Internal planning/feedback docs — kept outside git (moved to the personal notes folder)
+ava-project-plan.md
+review.md
 continue.sh
+
+# Large model binaries & voice samples — download/provide locally, never commit (see README)
+backend/voice_models/
+backend/voices/
+
+# Dead ChromaDB dirs still created at startup (RAG uses pgvector now)
+**/chroma_db/
+
+# Per-workspace + knowledge runtime data (private chat history, session index, transcripts) — NEVER commit
+**/chat_history/
+**/*.sqlite
+backend/workspaces/*/*.db
+backend/knowledge/meetings/

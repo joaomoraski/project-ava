@@ -1,0 +1,22 @@
+{
+  "name": "work",
+  "system_prompt": "",
+  "stt_gate_mode": "smart",
+  "proactivity": "medium",
+  "tools_enabled": [
+    "web_search",
+    "get_context"
+  ],
+  "plugins_enabled": ["context7"],
+  "collections": [
+    "notes",
+    "documents"
+  ],
+  "transcription_priority": {
+    "mode": "smart",
+    "high_priority_topics": [],
+    "low_priority_topics": [],
+    "behavior": ""
+  },
+  "knowledge_seeds": []
+}

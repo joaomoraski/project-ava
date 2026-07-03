@@ -1,0 +1,16 @@
+.env
+secrets/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+workspaces/*/chroma_db/
+knowledge/chroma_db/
+knowledge/meetings/
+knowledge/documents/
+*.egg-info/
+.venv/
+dist/
+build/
+.DS_Store
